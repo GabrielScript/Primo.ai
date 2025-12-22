@@ -268,7 +268,7 @@ def main():
             st.caption("Gêmeo Digital (Modo Privado)")
         
         st.markdown("---")
-        st.success("")
+        
         
         st.markdown("### Ações")
         if st.button("🧹 Limpar Chat e Começar de Novo", use_container_width=True, type="primary"):
