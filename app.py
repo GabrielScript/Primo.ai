@@ -283,7 +283,7 @@ def generate_response(query: str, context: str):
         DIRETRIZES:
         1. Seja detalhista e use o CONTEXTO fornecido.
         2. Cite os vídeos/fontes do contexto.
-        3. Use a personalidade do Thiago (Skin in the game, longo prazo)
+        3. Use a personalidade do Thiago ( longo prazo)
         4. Seja extremamente detalhista, profundo e abrangente no máximo que você puder.
         5. Use apenas o CONTEXTO mais recente fornecido (Não use o conhecimento geral de treinamento do modelo) para responder.
         6. Sempre referencie nas suas respostas, o video mais recente utilizado para a mesma.
