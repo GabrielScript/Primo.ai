@@ -7,4 +7,3 @@ venv/
 .venv/
 *.parquet
 .streamlit/secrets.toml
-primo_memory/
