@@ -265,7 +265,7 @@ def main():
             except: st.write("🧠")
         with c2:
             st.title("Primo.AI")
-            st.caption("Gêmeo Digital (Modo Privado)")
+            st.caption("Gêmeo Digital")
         
         st.markdown("---")
         
