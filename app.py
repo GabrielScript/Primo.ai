@@ -356,9 +356,15 @@ def main():
             create_new_chat_session()
 
     # --- SIDEBAR ---
+    
     with st.sidebar:
-        try: st.image(LOGO_PATH, width=60) 
-        except: st.write("🤖 Primo.AI")
+        c1, c2 = st.columns([1, 4])
+        with c1:
+            try: st.image(LOGO_PATH, width=50)
+            except: st.write("🤖")
+        with c2:
+            st.title("Primo.AI")
+            st.caption("Gêmeo Digital do Thiago Nigro | Desenvolvido por Gabriel Estrela")
         
         if st.button("➕ Nova Conversa", type="primary", use_container_width=True):
             create_new_chat_session()
