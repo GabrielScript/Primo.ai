@@ -292,87 +292,90 @@ def generate_response(query: str, context: str):
 # ============================================================================
 
 def main():
-    st.set_page_config(page_title="Primo.AI | Gêmeo Digital", page_icon=LOGO_PATH2, layout="wide")
+    st.set_page_config(
+        page_title="Primo.AI | Gêmeo Digital do Thiago Nigro", 
+        page_icon=LOGO_PATH2, 
+        layout="wide"
+    )
     
-    # CSS Customizado para os "Cards" do Sidemenu
+    # CSS Customizado: Definindo a estética de "Terminal Financeiro"
     st.markdown("""
         <style>
             .stApp { background-color: #0e1117; color: #f0f2f6; } 
-            .stChatMessage { background-color: #1f2937; border: 1px solid #374151; }
-            /* Estilo dos Botões de Histórico */
+            .stChatMessage { background-color: #1f2937; border: 1px solid #374151; border-radius: 12px; }
+            
+            /* Estilização dos Cards no Sidebar */
+            [data-testid="stSidebarNav"] { display: none; }
             div[data-testid="stSidebar"] button {
                 text-align: left;
                 width: 100%;
                 border-radius: 8px;
-                margin-bottom: 5px;
-                padding: 10px;
-                transition: all 0.2s;
+                margin-bottom: 4px;
+                padding: 8px 12px;
+                background-color: #262730;
+                border: 1px solid transparent;
             }
             div[data-testid="stSidebar"] button:hover {
                 border-color: #fca311;
-                color: #fca311;
+                background-color: #31333f;
             }
+            .chat-active { border: 1px solid #fca311 !important; color: #fca311; }
         </style>
     """, unsafe_allow_html=True)
 
-    # --- INICIALIZAÇÃO DE ESTADOS ---
+    # --- INICIALIZAÇÃO DE ESTADOS (O CÉREBRO) ---
+    
+    # 1. Base de Conhecimento (Static RAG) - Carregada do diretório do Git
     if "db" not in st.session_state:
-        # Carrega Base de Conhecimento
-        df_disk, bm25_disk = load_memory_from_disk()
-        if df_disk is not None:
+        with st.spinner("🧠 Sincronizando Base de Conhecimento..."):
+            df_disk, bm25_disk = load_memory_from_disk()
             st.session_state.db = df_disk
             st.session_state.bm25 = bm25_disk
-        else:
-            st.session_state.db = None
-            st.session_state.bm25 = None
-    
+
+    # 2. Histórico de Conversas (Dynamic Memory) - Carregado do Supabase
     if "all_chats" not in st.session_state:
         st.session_state.all_chats = load_chat_history()
     
+    # 3. Sessão Ativa
     if "active_session_id" not in st.session_state:
-        # Se não tiver sessão ativa, cria uma ou pega a mais recente
         if st.session_state.all_chats:
-            # Pega a última modificada (ou criada)
-            st.session_state.active_session_id = list(st.session_state.all_chats.keys())[-1]
+            # Seleciona a última conversa editada
+            st.session_state.active_session_id = list(st.session_state.all_chats.keys())[0]
         else:
             create_new_chat_session()
 
-    # --- SIDEBAR (HISTÓRICO & UPLOAD) ---
+    # --- SIDEBAR: O CENTRO DE COMANDO ---
     with st.sidebar:
-        c1, c2 = st.columns([1, 4])
-        with c1:
-            try: st.image(LOGO_PATH, width=50)
-            except: st.write("🤖")
-        with c2:
-            st.title("Primo.AI")
-            st.caption("Gêmeo Digital do Thiago Nigro | Desenvolvido por Gabriel Estrela")
-            
+        # Branding
+        st.markdown(f"""
+            <div style='display: flex; align-items: center; gap: 10px; margin-bottom: 20px;'>
+                <img src='https://raw.githubusercontent.com/seu-usuario/seu-repo/main/{LOGO_PATH}' width='40'>
+                <h2 style='margin: 0;'>Primo.AI</h2>
+            </div>
+        """, unsafe_allow_html=True)
         
-        # Botão NOVA CONVERSA
+        # Ação: Nova Conversa
         if st.button("➕ Nova Conversa", type="primary", use_container_width=True):
             create_new_chat_session()
             st.rerun()
             
         st.markdown("---")
-        st.caption("HISTÓRICO DE CONVERSAS")
+        st.caption("📂 HISTÓRICO DE MENTORIAS")
 
-        # Renderiza lista de conversas (Cards)
-        # Convertemos para lista para ordenar por timestamp (decrescente)
-        chat_list = []
-        for cid, cdata in st.session_state.all_chats.items():
-            chat_list.append({"id": cid, "title": cdata["title"], "ts": cdata["timestamp"]})
-        
-        # Ordena: Mais recentes primeiro
-        chat_list.sort(key=lambda x: x["ts"], reverse=True)
+        # Lista de Cards (Conversas anteriores)
+        # Ordenamos pelo timestamp para manter as recentes no topo
+        sorted_chats = sorted(
+            st.session_state.all_chats.items(), 
+            key=lambda x: x[1]['timestamp'], 
+            reverse=True
+        )
 
-        for chat in chat_list:
-            # Ícone diferente se for a conversa ativa
-            icon = "🟢" if chat["id"] == st.session_state.active_session_id else "💬"
-            label = f"{icon} {chat['title']}"
+        for cid, cdata in sorted_chats:
+            is_active = (cid == st.session_state.active_session_id)
+            btn_label = f"{'🟢' if is_active else '💬'} {cdata['title']}"
             
-            # Usamos o ID como key do botão para unicidade
-            if st.button(label, key=f"btn_{chat['id']}"):
-                st.session_state.active_session_id = chat["id"]
+            if st.button(btn_label, key=f"chat_btn_{cid}"):
+                st.session_state.active_session_id = cid
                 st.rerun()
 
         st.markdown("---")
