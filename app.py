@@ -119,140 +119,102 @@ class SimpleBM25:
                 scores[i] += numerator / denominator
         return scores
 
+# --- SETUP SUPABASE ---
+# Tenta pegar dos secrets do Streamlit (nuvem) ou variáveis de ambiente (local)
+SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
+
+# Conecta ao banco (Singleton)
+@st.cache_resource
+def get_supabase_client():
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return None
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # ============================================================================
-# 3. GESTÃO DE DADOS & MEMÓRIA DE CHAT (NOVO)
+# NOVA GESTÃO DE CHAT (VIA SUPABASE)
 # ============================================================================
 
 def load_chat_history() -> Dict:
-    """Carrega o histórico de todas as conversas do disco."""
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            st.error(f"Erro ao carregar histórico: {e}")
-            return {}
-    return {}
-
-def save_chat_history(history: Dict):
-    """Salva o histórico atualizado no disco."""
+    """Baixa o histórico do Supabase."""
+    supabase = get_supabase_client()
+    if not supabase: return {}
+    
     try:
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=4)
+        # Pega todas as sessões ordenadas pela última atualização
+        response = supabase.table("chat_sessions").select("*").order("last_updated", desc=True).execute()
+        
+        # Converte a resposta do banco para o formato do nosso app (Dicionário)
+        history = {}
+        for row in response.data:
+            history[row['session_id']] = {
+                "title": row['title'],
+                "timestamp": row['last_updated'], # ou created_at
+                "messages": row['messages']
+            }
+        return history
     except Exception as e:
-        st.error(f"Erro ao salvar histórico: {e}")
+        st.error(f"Erro ao conectar na memória nuvem: {e}")
+        return {}
+
+def save_chat_session_remote(session_id: str, session_data: Dict):
+    """Salva/Atualiza UMA sessão específica no Supabase."""
+    supabase = get_supabase_client()
+    if not supabase: return
+
+    try:
+        # Prepara o payload
+        data = {
+            "session_id": session_id,
+            "title": session_data["title"],
+            "messages": session_data["messages"],
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        # Upsert: Se existe atualiza, se não cria
+        supabase.table("chat_sessions").upsert(data).execute()
+    except Exception as e:
+        st.error(f"Erro ao salvar pensamento: {e}")
 
 def create_new_chat_session():
-    """Cria uma nova sessão e define como ativa."""
+    """Cria nova sessão local e remota."""
     new_id = str(uuid.uuid4())
-    st.session_state.all_chats[new_id] = {
+    new_data = {
         "title": "Nova Conversa",
         "timestamp": datetime.now().isoformat(),
         "messages": []
     }
+    
+    # Atualiza estado local
+    st.session_state.all_chats[new_id] = new_data
     st.session_state.active_session_id = new_id
-    save_chat_history(st.session_state.all_chats)
+    
+    # Sincroniza nuvem
+    save_chat_session_remote(new_id, new_data)
 
 def delete_chat_session(session_id):
-    """Remove uma conversa específica."""
+    """Remove do banco e do estado local."""
+    supabase = get_supabase_client()
+    
+    # Remove local
     if session_id in st.session_state.all_chats:
         del st.session_state.all_chats[session_id]
-        save_chat_history(st.session_state.all_chats)
-        # Se deletou a atual, cria uma nova ou pega a última disponível
-        if st.session_state.active_session_id == session_id:
-            remaining_ids = list(st.session_state.all_chats.keys())
-            if remaining_ids:
-                st.session_state.active_session_id = remaining_ids[0]
-            else:
-                create_new_chat_session()
-        st.rerun()
-
-def save_memory_to_disk(df: pd.DataFrame, bm25: SimpleBM25):
-    try:
-        df.to_parquet(DB_FILE, index=False)
-        with open(INDEX_FILE, 'wb') as f:
-            pickle.dump(bm25, f)
-        return True
-    except Exception as e:
-        st.error(f"Erro ao salvar memória: {e}")
-        return False
-
-def load_memory_from_disk() -> Tuple[Optional[pd.DataFrame], Optional[SimpleBM25]]:
-    if os.path.exists(DB_FILE) and os.path.exists(INDEX_FILE):
+    
+    # Remove remoto
+    if supabase:
         try:
-            df = pd.read_parquet(DB_FILE)
-            with open(INDEX_FILE, 'rb') as f:
-                bm25 = pickle.load(f)
-            return df, bm25
+            supabase.table("chat_sessions").delete().eq("session_id", session_id).execute()
         except Exception as e:
-            st.warning(f"Memória corrompida: {e}")
-            return None, None
-    return None, None
+            st.error(f"Erro ao deletar da nuvem: {e}")
 
-def process_uploaded_files(uploaded_files, existing_df=None):
-    all_dfs = []
-    if existing_df is not None and not existing_df.empty:
-        all_dfs.append(existing_df)
-
-    progress_text = "Processando novos arquivos..."
-    my_bar = st.progress(0, text=progress_text)
-    total_files = len(uploaded_files)
-
-    try:
-        for i, uploaded_file in enumerate(uploaded_files):
-            file_name = uploaded_file.name.lower()
-            df_temp = pd.DataFrame()
-            my_bar.progress(int((i / total_files) * 100), text=f"Lendo: {file_name}")
-
-            if file_name.endswith('.parquet'):
-                df_temp = pd.read_parquet(uploaded_file)
-            elif file_name.endswith('.txt'):
-                conteudo_txt = uploaded_file.read().decode("utf-8")
-                df_temp = pd.DataFrame({'text': [conteudo_txt]})
-            elif file_name.endswith('.pdf'):
-                pdf_reader = PdfReader(uploaded_file)
-                texto = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
-                df_temp = pd.DataFrame({'text': [texto]})
-            elif file_name.endswith('.json'):
-                data = json.load(uploaded_file)
-                if isinstance(data, list): df_temp = pd.DataFrame(data)
-                elif isinstance(data, dict):
-                    for k in ['transcriptions', 'chunks', 'data']:
-                        if k in data and isinstance(data[k], list):
-                            df_temp = pd.DataFrame(data[k])
-                            break
-                    if df_temp.empty: df_temp = pd.DataFrame([data])
-
-            if not df_temp.empty:
-                df_temp.columns = [c.lower() for c in df_temp.columns]
-                text_col = next((c for c in df_temp.columns if c in ['text', 'transcript', 'content', 'body', 'clean_text']), None)
-                title_col = next((c for c in df_temp.columns if c in ['title', 'source', 'video_title', 'source_title']), None)
-                url_col = next((c for c in df_temp.columns if c in ['url', 'link', 'source_url']), None)
-
-                if text_col:
-                    df_temp['clean_text'] = df_temp[text_col].astype(str).str.strip()
-                    df_temp = df_temp[df_temp['clean_text'].str.len() > MIN_CHUNK_LENGTH]
-                    df_temp['source_title'] = df_temp[title_col] if title_col else os.path.splitext(uploaded_file.name)[0]
-                    df_temp['source_url'] = df_temp[url_col] if url_col else "#"
-                    all_dfs.append(df_temp[['clean_text', 'source_title', 'source_url']])
-
-        my_bar.empty()
-        if not all_dfs: return None, None
-
-        final_df = pd.concat(all_dfs, ignore_index=True)
-        final_df.drop_duplicates(subset=['clean_text'], inplace=True)
-        
-        corpus = final_df['clean_text'].tolist()
-        if not corpus: return None, None
-        
-        bm25_engine = SimpleBM25(corpus)
-        save_memory_to_disk(final_df, bm25_engine)
-        return final_df, bm25_engine
-
-    except Exception as e:
-        my_bar.empty()
-        st.error(f"Erro no processamento: {e}")
-        return None, None
+    # Lógica de redirecionamento
+    if st.session_state.active_session_id == session_id:
+        remaining_ids = list(st.session_state.all_chats.keys())
+        if remaining_ids:
+            st.session_state.active_session_id = remaining_ids[0]
+        else:
+            create_new_chat_session()
+    st.rerun()
 
 @st.cache_resource
 def get_llm_client():
@@ -414,75 +376,55 @@ def main():
                 st.rerun()
 
         st.markdown("---")
-        with st.expander("⚙️ Gestão de Memória"):
-            if st.session_state.db is not None:
-                st.info(f"📚 {len(st.session_state.db)} docs indexados")
-            
-            uploaded_files = st.file_uploader(
-                "Adicionar Conhecimento", 
-                type=['json', 'parquet', 'pdf', 'txt'],
-                accept_multiple_files=True 
-            )
-            if uploaded_files and st.button("Processar Upload"):
-                current_df = st.session_state.db
-                new_df, new_bm25 = process_uploaded_files(uploaded_files, current_df)
-                if new_df is not None:
-                    st.session_state.db = new_df
-                    st.session_state.bm25 = new_bm25
-                    st.rerun()
-
-            if st.button("🗑️ Limpar Chat Atual"):
-                st.session_state.all_chats[st.session_state.active_session_id]["messages"] = []
-                save_chat_history(st.session_state.all_chats)
-                st.rerun()
-                
-            if st.button("❌ Deletar Chat Atual"):
+        with st.expander("🛠️ Status do Sistema"):
+            st.write(f"Conhecimento: {len(st.session_state.db) if st.session_state.db is not None else 0} chunks")
+            st.write(f"Cloud: Supabase Online ✅")
+            if st.button("🗑️ Deletar Conversa Atual"):
                 delete_chat_session(st.session_state.active_session_id)
 
-    # --- MAIN AREA ---
+    # --- MAIN CHAT AREA ---
     current_id = st.session_state.active_session_id
-    current_chat = st.session_state.all_chats[current_id]
-    messages = current_chat["messages"]
+    current_chat_data = st.session_state.all_chats[current_id]
+    messages = current_chat_data["messages"]
 
-    # Renderiza mensagens
+    # Renderiza o histórico de mensagens da sessão atual
     for msg in messages:
-        with st.chat_message(msg["role"]): st.markdown(msg["content"])
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    # Input do Usuário
-    if prompt := st.chat_input("Pergunte algo ao Primo..."):
-        if st.session_state.db is None:
-            st.error("⚠️ O Primo ainda não tem conhecimento. Faça upload na barra lateral.")
-            st.stop()
-
-        # 1. Adiciona user msg ao estado e renderiza
-        new_msg = {"role": "user", "content": prompt}
-        messages.append(new_msg)
+    # Logica de Entrada de Usuário
+    if prompt := st.chat_input("Pergunte ao Primo sobre investimentos, foco ou gestão..."):
+        
+        # 1. Update UI & Local State
+        new_user_message = {"role": "user", "content": prompt}
+        messages.append(new_user_message)
         st.session_state.all_chats[current_id]["messages"] = messages
         
-        # Atualiza título se for a primeira mensagem
+        # 2. Auto-titulação (Somente se for a primeira interação da conversa)
         if len(messages) == 1:
-            # Pega as primeiras 5 palavras ou 30 caracteres
-            title_candidate = " ".join(prompt.split()[:5])
-            st.session_state.all_chats[current_id]["title"] = title_candidate[:30] + "..."
-        
-        # Atualiza timestamp para subir no ranking
+            title = prompt[:30] + ("..." if len(prompt) > 30 else "")
+            st.session_state.all_chats[current_id]["title"] = title
+            
+        # 3. Sincronização Remota (Início)
         st.session_state.all_chats[current_id]["timestamp"] = datetime.now().isoformat()
+        save_chat_session_remote(current_id, st.session_state.all_chats[current_id])
         
-        # Salva estado intermediário
-        save_chat_history(st.session_state.all_chats)
-        
-        with st.chat_message("user"): st.markdown(prompt)
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-        # 2. Gera resposta do Assistant
+        # 4. Geração de Resposta com RAG
         with st.chat_message("assistant"):
             resp_container = st.empty()
-            with st.spinner("🔍 Consultando a base de sabedoria..."):
+            
+            with st.spinner("🔍 Consultando fontes e Skin in the Game..."):
                 context = retrieve_context(prompt, st.session_state.db, st.session_state.bm25)
             
             if not context:
-                msg_fail = "Primo, procurei nos meus arquivos aqui e não achei nada sobre isso."
+                msg_fail = "Primo, não encontrei referências específicas disso nas minhas mentorias gravadas. Mas como Thiago Nigro, eu diria para focar no longo prazo!"
                 resp_container.markdown(msg_fail)
                 messages.append({"role": "assistant", "content": msg_fail})
+                st.session_state.all_chats[current_id]["messages"] = messages
+                save_chat_session_remote(current_id, st.session_state.all_chats[current_id])
             else:
                 full_res = ""
                 try:
@@ -493,17 +435,18 @@ def main():
                         resp_container.markdown(full_res + "▌")
                     
                     resp_container.markdown(full_res)
+                    
+                    # 5. Finalização & Sincronização Remota (Fim)
                     messages.append({"role": "assistant", "content": full_res})
-                    
-                    # Salva resposta final no histórico
                     st.session_state.all_chats[current_id]["messages"] = messages
-                    save_chat_history(st.session_state.all_chats)
+                    save_chat_session_remote(current_id, st.session_state.all_chats[current_id])
                     
-                    # Força rerun para atualizar título no sidebar se for novo
-                    if len(messages) == 2: st.rerun()
+                    # Rerun para atualizar o título no sidebar se foi a primeira vez
+                    if len(messages) <= 2:
+                        st.rerun()
 
                 except Exception as e:
-                    st.error(f"Erro na API: {e}")
+                    st.error(f"Erro na conexão com DeepSeek: {e}")
 
 if __name__ == "__main__":
     main()
