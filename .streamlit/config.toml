@@ -1,0 +1,14 @@
+[theme]
+base = "dark"
+primaryColor = "#00ff00"  # Verde Hacker para acentos
+backgroundColor = "#050505" # Fundo quase preto
+secondaryBackgroundColor = "#111111" # Sidebar e inputs escuros
+textColor = "#e0e0e0"
+font = "sans serif"
+
+# Configurações Avançadas [cite: 177, 180, 260, 261]
+# Arredondamento e bordas para visual "Clean Tech"
+buttonRadius = "4px"
+blockLists = "sans serif"
+codeFont = "monospace"
+dataframeBorderColor = "#333333"
