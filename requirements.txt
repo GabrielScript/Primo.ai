@@ -1,6 +1,9 @@
 streamlit
-pandas
-python-dotenv
-pyarrow
 openai
+pandas
+PyPDF2
+python-dotenv
+tenacity
 supabase
+pyarrow
+fastparquet
