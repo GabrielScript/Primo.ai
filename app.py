@@ -305,7 +305,7 @@ def main():
             
             # Lógica de Falha ou Sucesso
             if not context:
-                msg_fail = "Primo, procurei aqui em todos os meus vídeos e livros, mas não achei nada específico sobre isso no meu contexto atual. Você tem certeza que eu já falei sobre isso?"
+                msg_fail = "E aí, primo! Tudo bem com você?Procurei aqui em todos os meus vídeos e livros, mas não achei nada específico sobre isso no meu contexto atual. Você tem certeza que eu já falei sobre isso ou se trata de uma pergunta solta?"
                 resp_container.markdown(msg_fail)
                 st.session_state.messages.append({"role": "assistant", "content": msg_fail})
             else:
