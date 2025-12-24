@@ -219,7 +219,7 @@ def retrieve_context(query: str, df: pd.DataFrame, bm25: SimpleBM25) -> str:
 
     return clean_redundant_context(context_blocks)
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=5))
+
 def generate_response(query: str, context: str):
     """Gera a resposta usando o DeepSeek com a persona do Primo."""
     
@@ -240,23 +240,37 @@ def generate_response(query: str, context: str):
     
     full_prompt = f"CONTEXTO RECUPERADO:\n{context}\n\nPERGUNTA DO PRIMO:\n{query}"
     client = get_llm_client()
-    if not client: return None
+    if not client:
+        st.error("Erro: Cliente LLM não pôde ser inicializado.")
+        return None
 
-    stream = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[{"role": "system", "content": system_persona}, {"role": "user", "content": full_prompt}],
-        stream=True,
-        temperature=TEMPERATURE,
-        max_tokens=16000, # Máximo permitido
-        extra_body ={
-            "reasoning": {"enabled": True} 
-        }
-    )
-    return stream
+    try:
+        # Chamada direta sem retry automático para evitar erro de serialização de gerador
+        stream = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system_persona}, 
+                {"role": "user", "content": full_prompt}
+            ],
+            stream=True,
+            temperature=TEMPERATURE,
+            max_tokens=10000, # Reduzi levemente por segurança no tier free
+            extra_body={
+                "reasoning": {"enabled": True} 
+            }
+        )
+        return stream
 
-# ============================================================================
+    except Exception as e:
+        # Captura o erro real (RateLimit, Timeout, Auth) e mostra pro usuário
+        st.error(f"⚠️ Erro na API do OpenRouter: {str(e)}")
+        # Log detalhado para debug no terminal
+        logging.error(f"Erro detalhado na geração: {e}", exc_info=True)
+        return None
+
+
 # 5. UI PRINCIPAL (STREAMLIT)
-# ============================================================================
+
 
 def main():
     st.set_page_config(
