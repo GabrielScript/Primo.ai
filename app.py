@@ -13,9 +13,8 @@ from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 from difflib import SequenceMatcher
 
-# ============================================================================
+
 # 1. CONFIGURAÇÃO & HIPERPARÂMETROS
-# ============================================================================
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -254,7 +253,7 @@ def generate_response(query: str, context: str):
             ],
             stream=True,
             temperature=TEMPERATURE,
-            max_tokens=16000, # Reduzi levemente por segurança no tier free
+            max_tokens=8000, 
             extra_body={
                 "reasoning": {"enabled": True} 
             }
