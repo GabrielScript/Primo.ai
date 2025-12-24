@@ -11,6 +11,7 @@ from collections import Counter
 from dotenv import load_dotenv
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
+from difflib import SequenceMatcher
 
 # ============================================================================
 # 1. CONFIGURAÇÃO & HIPERPARÂMETROS
@@ -156,7 +157,22 @@ def load_memory_from_disk() -> Tuple[Optional[pd.DataFrame], Optional[SimpleBM25
             st.warning(f"Erro ao carregar memória do disco: {e}")
             return None, None
     return None, None
+def is_similar(a, b, threshold=0.7):
+    """Calcula se dois textos são 70% idênticos."""
+    return SequenceMatcher(None, a, b).ratio() > threshold
 
+def clean_redundant_context(context_blocks: List[str]) -> str:
+    """Remove blocos de texto que dizem a mesma coisa."""
+    unique_blocks = []
+    for block in context_blocks:
+        is_duplicate = False
+        for unique in unique_blocks:
+            if is_similar(block, unique):
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_blocks.append(block)
+    return "".join(unique_blocks)
 # ============================================================================
 # 4. MOTOR DE BUSCA E GERAÇÃO (CORE)
 # ============================================================================
@@ -201,7 +217,7 @@ def retrieve_context(query: str, df: pd.DataFrame, bm25: SimpleBM25) -> str:
         context_blocks.append(block)
         current_chars += len(block)
 
-    return "".join(context_blocks)
+    return clean_redundant_context(context_blocks)
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=5))
 def generate_response(query: str, context: str):
