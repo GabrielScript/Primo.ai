@@ -122,7 +122,7 @@ class SimpleBM25:
 # 3. GESTÃO DE CONEXÕES E DADOS
 # ============================================================================
 
-@st.cache_data
+@st.cache_resource
 def get_llm_client():
     """
     Conecta à API do OpenRouter usando a biblioteca padrão da OpenAI.
