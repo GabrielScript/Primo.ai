@@ -1,9 +1,3 @@
-# app.py
-# ----------------------------------------------------------------------------
-# ARQUITETURA: RAG Local (Git) + DeepSeek + Sessão Ephemeral (100% Privada)
-# AUTOR: Ph.D. Assistant & User
-# VERSÃO: 9.1 (Privacy Edition - Sem Banco de Dados Externo)
-# ----------------------------------------------------------------------------
 
 import os
 import math
@@ -37,16 +31,19 @@ LOGO_PATH = "Primo_LOGO-removebg-preview.png"
 LOGO_PATH2 = "Logo_primo.png"
 
 # --- TUNING DE RETRIEVAL (Ajuste Fino da Busca) ---
-MAX_SAFE_TOKENS = 80000     
-MAX_SAFE_CHARS = MAX_SAFE_TOKENS * 4 
-MAX_RETRIEVED_DOCS = 5      
-CONTEXT_WINDOW_SIZE = 2      
+MAX_SAFE_TOKENS = 100000
+MAX_SAFE_CHARS = MAX_SAFE_TOKENS * 3.5
+MAX_RETRIEVED_DOCS = 8    
+CONTEXT_WINDOW_SIZE = 4     
 
 # --- LLM CONFIG (DeepSeek) ---
-LLM_MODEL = "deepseek-chat"
+LLM_MODEL = "openai/gpt-oss-120b:free"
 TEMPERATURE = 0.3            
-BASE_URL = "https://api.deepseek.com"
+BASE_URL = "https://openrouter.ai/api/v1"
 
+# Identificação do App para o OpenRouter (Boas Práticas)
+APP_URL = "https://primo-digital-twin.streamlit.app" # Pode ser localhost se estiver testando
+APP_TITLE = "Primo.AI Digital Twin"
 # ============================================================================
 # 2. ALGORITMO BM25 (MOTOR DE BUSCA)
 # ============================================================================
@@ -79,7 +76,9 @@ class SimpleBM25:
             'seríamos', 'seriam', 'tenho', 'tem', 'temos', 'tém', 'tinha', 'tínhamos', 'tinham', 'tive', 
             'teve', 'tivemos', 'tiveram', 'tivera', 'tivéramos', 'tenha', 'tenhamos', 'tenham', 'tivesse', 
             'tivéssemos', 'tivessem', 'tiver', 'tivermos', 'tiverem', 'terei', 'terá', 'teremos', 'terão', 
-            'teria', 'teríamos', 'teriam'
+            'teria', 'teríamos', 'teriam'# Vícios de Linguagem (CRUCIAL PARA YOUTUBE)
+            'aí', 'então', 'né', 'tipo', 'sabe', 'assim', 'olha', 'cara', 'gente', 
+            'tá', 'bom', 'agora', 'aqui', 'ali', 'entendeu', 'viu', 'digamos'
         }
         self._initialize(corpus)
 
@@ -102,7 +101,7 @@ class SimpleBM25:
         text = str(text).lower()
         text = re.sub(r'[^\w\s]', '', text) 
         tokens = text.split()
-        return [t for t in tokens if t not in self.stopwords and len(t) > 2]
+        return [t for t in tokens if t not in self.stopwords and len(t) >= 2]
 
     def get_scores(self, query: str) -> List[float]:
         query_tokens = self._tokenize(query)
@@ -122,14 +121,27 @@ class SimpleBM25:
 # 3. GESTÃO DE CONEXÕES E DADOS
 # ============================================================================
 
-@st.cache_resource
+@st.cache_data
 def get_llm_client():
-    """Conecta à API do DeepSeek usando secrets do Streamlit ou .env"""
-    api_key = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    """
+    Conecta à API do OpenRouter usando a biblioteca padrão da OpenAI.
+    Requer a chave OPENROUTER_API_KEY no .env ou secrets.
+    """
+    api_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    
     if not api_key:
-        st.error("⚠️ Chave da API DeepSeek não encontrada. Adicione ao .env ou Secrets.")
+        st.error("⚠️ Chave da API OpenRouter não encontrada. Adicione 'OPENROUTER_API_KEY' ao .env ou Secrets.")
         return None
-    return OpenAI(base_url=BASE_URL, api_key=api_key)
+    
+    # OpenRouter recomenda headers adicionais para identificar a origem
+    return OpenAI(
+        base_url=BASE_URL,
+        api_key=api_key,
+        default_headers={
+            "HTTP-Referer": APP_URL,
+            "X-Title": APP_TITLE,
+        }
+    )
 
 @st.cache_resource
 def load_memory_from_disk() -> Tuple[Optional[pd.DataFrame], Optional[SimpleBM25]]:
@@ -219,7 +231,7 @@ def generate_response(query: str, context: str):
         messages=[{"role": "system", "content": system_persona}, {"role": "user", "content": full_prompt}],
         stream=True,
         temperature=TEMPERATURE,
-        max_tokens=8000 # Máximo permitido
+        max_tokens=16000 # Máximo permitido
     )
     return stream
 
