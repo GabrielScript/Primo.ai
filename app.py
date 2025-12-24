@@ -45,9 +45,9 @@ BASE_URL = "https://openrouter.ai/api/v1"
 # Identificação do App para o OpenRouter (Boas Práticas)
 APP_URL = "https://primo-digital-twin.streamlit.app" # Pode ser localhost se estiver testando
 APP_TITLE = "Primo.AI Digital Twin"
-# ============================================================================
+
 # 2. ALGORITMO BM25 (MOTOR DE BUSCA)
-# ============================================================================
+
 # Esta classe é necessária para ler o arquivo .pkl gerado anteriormente
 
 class SimpleBM25:
@@ -118,9 +118,9 @@ class SimpleBM25:
                 scores[i] += numerator / denominator
         return scores
 
-# ============================================================================
+
 # 3. GESTÃO DE CONEXÕES E DADOS
-# ============================================================================
+
 
 @st.cache_resource
 def get_llm_client():
@@ -173,9 +173,9 @@ def clean_redundant_context(context_blocks: List[str]) -> str:
         if not is_duplicate:
             unique_blocks.append(block)
     return "".join(unique_blocks)
-# ============================================================================
+
 # 4. MOTOR DE BUSCA E GERAÇÃO (CORE)
-# ============================================================================
+
 
 def retrieve_context(query: str, df: pd.DataFrame, bm25: SimpleBM25) -> str:
     """Busca os trechos mais relevantes nas transcrições."""
@@ -346,7 +346,7 @@ def main():
             resp_container = st.empty()
             
             # Retrieval (Busca nas transcrições locais)
-            with st.spinner("Consultando biblioteca mental do Primo..."):
+            with st.spinner("Consultando conhecimento do Primo..."):
                 context = retrieve_context(prompt, st.session_state.db, st.session_state.bm25)
             
             # Lógica de Falha ou Sucesso
