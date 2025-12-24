@@ -247,7 +247,10 @@ def generate_response(query: str, context: str):
         messages=[{"role": "system", "content": system_persona}, {"role": "user", "content": full_prompt}],
         stream=True,
         temperature=TEMPERATURE,
-        max_tokens=16000 # Máximo permitido
+        max_tokens=16000, # Máximo permitido
+        extra_body ={
+            "reasoning": {"enabled": True} 
+        }
     )
     return stream
 
