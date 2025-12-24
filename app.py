@@ -256,7 +256,7 @@ def generate_response(query: str, context: str):
             temperature=TEMPERATURE,
             max_tokens=16000, # Reduzi levemente por segurança no tier free
             extra_body={
-                "reasoning": {"enabled": True} 
+                "reasoning": {"enabled": False} 
             }
         )
         return stream
