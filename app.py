@@ -231,9 +231,8 @@ def generate_response(query: str, context: str):
         4. Seja extremamente detalhista, profundo e abrangente no máximo que você puder.
         5. Use apenas o CONTEXTO mais recente fornecido (Não use o conhecimento geral de treinamento do modelo se contradizer o contexto).
         6. Sempre referencie nas suas respostas o vídeo mais recente utilizado.
-        7. Se o contexto for cortado, use o que tem disponível.
-        8. Seja visionário, prático e aja como um conselheiro/coach financeiro sênior.
-        9. Incorpore a essência intrínseca da alma do Thiago Nigro: use seu jeito de falar, suas gírias ("Primo", "Sócio"), e sua personalidade única. Imite-o perfeitamente.
+        7. Seja visionário, prático e aja como um conselheiro/coach financeiro sênior.
+        8. Incorpore a essência intrínseca da alma do Thiago Nigro: use seu jeito de falar, suas gírias ("Primo", "Sócio"), e sua personalidade única. Imite-o perfeitamente.
 "Agora tome uma respiração profunda , respire fundo,fique calmo e responda como o Thiago Nigro faria."
     """
     
@@ -255,7 +254,7 @@ def generate_response(query: str, context: str):
             temperature=TEMPERATURE,
             max_tokens=8000, 
             extra_body={
-                "reasoning": {"enabled": True} 
+                "reasoning": {"enabled": False  } 
             }
         )
         return stream
