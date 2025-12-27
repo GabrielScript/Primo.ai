@@ -112,73 +112,139 @@ class SimpleBM25:
 # --- 3. CAMADA DE DADOS (PERSISTÊNCIA) ---
 
 class KnowledgeBase:
-    """Gerencia o carregamento e integridade dos dados locais."""
+    """Gerencia o carregamento, integridade e reconstrução da memória."""
     
     def __init__(self, config: AppConfig):
         self.config = config
         self.df = None
         self.index = None
 
+    def build_index(self):
+        """Reconstrói o índice BM25 do zero usando o DataFrame carregado."""
+        if self.df is None or self.df.empty:
+            logging.error("Tentativa de indexar DataFrame vazio.")
+            return False
+            
+        logging.info("♻️ Reconstruindo índice BM25 com nova lógica...")
+        try:
+            # Extrai a lista de textos para indexar
+            corpus = self.df['clean_text'].tolist()
+            # Cria o objeto BM25 com a nova lógica otimizada
+            self.index = SimpleBM25(corpus)
+            
+            # Salva no disco para a próxima vez ser mais rápido
+            with open(self.config.INDEX_FILE, 'wb') as f:
+                pickle.dump(self.index, f)
+            logging.info("✅ Índice reconstruído e salvo com sucesso.")
+            return True
+        except Exception as e:
+            logging.error(f"Erro ao reconstruir índice: {e}")
+            return False
+
     def load(self) -> bool:
-        """Carrega DataFrame e Índice do disco."""
-        if not os.path.exists(self.config.DB_FILE) or not os.path.exists(self.config.INDEX_FILE):
-            logging.error("Arquivos de memória não encontrados.")
+        """Carrega DataFrame e tenta carregar (ou recriar) o Índice."""
+        # 1. Carrega o 'Corpo' (Parquet)
+        if not os.path.exists(self.config.DB_FILE):
+            logging.error(f"ARQUIVO NÃO ENCONTRADO: {self.config.DB_FILE}")
             return False
             
         try:
             self.df = pd.read_parquet(self.config.DB_FILE)
-            with open(self.config.INDEX_FILE, 'rb') as f:
-                self.index = pickle.load(f)
-            return True
+            logging.info(f"📚 Parquet carregado: {len(self.df)} documentos.")
         except Exception as e:
-            logging.error(f"Erro crítico ao carregar memória: {e}")
+            logging.error(f"Erro crítico ao ler Parquet: {e}")
             return False
+
+        # 2. Tenta carregar o 'Cérebro' (Pickle/Index)
+        index_loaded = False
+        if os.path.exists(self.config.INDEX_FILE):
+            try:
+                with open(self.config.INDEX_FILE, 'rb') as f:
+                    self.index = pickle.load(f)
+                logging.info("🧠 Índice carregado do disco.")
+                index_loaded = True
+            except Exception as e:
+                logging.warning(f"⚠️ Índice antigo incompatível ({e}). Será recriado.")
+        
+        # 3. Se não carregou (ou não existia), Recria.
+        if not index_loaded:
+            return self.build_index()
+            
+        return True
 
 # --- 4. CAMADA DE SERVIÇO (BUSCA E INTELIGÊNCIA) ---
 
 class NeuralSearchEngine:
-    """Cérebro de recuperação de informação."""
+    """Cérebro de recuperação com Fallback de Segurança."""
     
     def __init__(self, knowledge_base: KnowledgeBase):
         self.kb = knowledge_base
 
     def _deduplicate(self, blocks: List[str]) -> str:
-        """Remove redundância usando Hash MD5 (Rápido O(N))."""
         seen = set()
         unique = []
         for block in blocks:
+            # Hash simples para evitar textos idênticos repetidos
             h = hashlib.md5(block.strip().encode('utf-8')).hexdigest()
             if h not in seen:
                 seen.add(h)
                 unique.append(block)
         return "".join(unique)
 
+    def _format_results(self, rows) -> List[str]:
+        """Formata as linhas do DF em texto pronto para o LLM."""
+        blocks = []
+        current_chars = 0
+        for _, row in rows.iterrows():
+            block = f"""
+            >>> DOCUMENTO RECUPERADO
+            FONTE: {row['source_title']}
+            CONTEÚDO: {row['clean_text']}
+            """
+            if current_chars + len(block) > CONFIG.MAX_SAFE_CHARS:
+                break
+            blocks.append(block)
+            current_chars += len(block)
+        return blocks
+
     def search(self, query: str) -> Optional[str]:
         if self.kb.df is None or self.kb.index is None:
             return None
 
+        # --- ESTRATÉGIA 1: Busca Semântica/Probabilística (BM25) ---
         scores = self.kb.index.get_scores(query)
         
-        # Filtro de Relevância: Pega scores acima de 1.0
-        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.2]
+        # Threshold baixíssimo (0.1) para pegar qualquer coisa vagamente relacionada
+        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.1]
         
-        if not indexed_scores:
-            return None
+        top_indices = []
+        if indexed_scores:
+            # Se achou algo pelo BM25, ótimo.
+            top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:CONFIG.MAX_RETRIEVED_DOCS]
+            top_indices = [x[0] for x in top_indices]
+            logging.info(f"🎯 BM25 encontrou {len(top_indices)} resultados.")
+        
+        # --- ESTRATÉGIA 2: Busca "Bruta" (Keyword Match Fallback) ---
+        # Se o BM25 falhou (retornou vazio), usamos força bruta (string contains)
+        if not top_indices:
+            logging.warning("⚠️ BM25 falhou. Tentando busca por palavra-chave bruta...")
+            # Pega palavras da query com mais de 4 letras (ignora 'o', 'que', etc)
+            keywords = [w for w in query.split() if len(w) > 4]
+            
+            if keywords:
+                # Procura a primeira palavra-chave relevante no texto
+                mask = self.kb.df['clean_text'].str.contains(keywords[0], case=False, na=False)
+                fallback_rows = self.kb.df[mask].head(3)
+                if not fallback_rows.empty:
+                    top_indices = fallback_rows.index.tolist()
+                    logging.info(f"🔧 Busca Bruta salvou o dia! Encontrou {len(top_indices)} resultados.")
 
-        # Ordena e corta
-        top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:CONFIG.MAX_RETRIEVED_DOCS]
-        top_indices = [x[0] for x in top_indices]
+        # --- FINALIZAÇÃO ---
+        if not top_indices:
+            return None # Realmente não tem nada no banco sobre isso
 
-        context_blocks = []
-        current_chars = 0
         rows = self.kb.df.iloc[top_indices]
-
-        for _, row in rows.iterrows():
-            block = f"\n📺 REFERÊNCIA: {row['source_title']}\n📄 CONTEÚDO: {row['clean_text']}\n"
-            if current_chars + len(block) > CONFIG.MAX_SAFE_CHARS:
-                break
-            context_blocks.append(block)
-            current_chars += len(block)
+        context_blocks = self._format_results(rows)
 
         return self._deduplicate(context_blocks)
 
