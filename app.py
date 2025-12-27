@@ -160,7 +160,7 @@ class NeuralSearchEngine:
         scores = self.kb.index.get_scores(query)
         
         # Filtro de Relevância: Pega scores acima de 1.0
-        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.8]
+        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.2]
         
         if not indexed_scores:
             return None
@@ -282,18 +282,14 @@ class PrimoInterface:
                 except: st.write("🧠")
             with col2:
                 st.subheader("Primo.AI")
-                st.caption("Gêmeo Digital v2.0")
+                st.caption("Gêmeo Digital | Desenvolvido por Gabriel Estrela")
             
             st.markdown("---")
             if st.button("🧹 Nova Conversa", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
                 
-            # Debug Area (Visionary Feature)
-            with st.expander("🛠️ Debug do Desenvolvedor"):
-                st.info(f"Modelo: {CONFIG.LLM_MODEL}")
-                if "last_context_size" in st.session_state:
-                    st.write(f"Último Contexto: {st.session_state.last_context_size} chars")
+            
 
     def run(self):
         self.initialize_session()
