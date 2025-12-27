@@ -1,93 +1,74 @@
-
 import os
 import math
 import re
 import pickle
 import logging
+import hashlib
 import streamlit as st
 import pandas as pd
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from collections import Counter
 from dotenv import load_dotenv
 from openai import OpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
-from difflib import SequenceMatcher
+from dataclasses import dataclass
 
-
-# 1. CONFIGURAÇÃO & HIPERPARÂMETROS
+# --- 1. CONFIGURAÇÃO & SINGLETONS ---
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- CAMINHOS DE PERSISTÊNCIA (MEMÓRIA DE CONHECIMENTO) ---
-# A pasta 'primo_memory' deve estar na raiz do seu repositório Git
-MEMORY_DIR = "primo_memory"
-DB_FILE = os.path.join(MEMORY_DIR, "knowledge_base.parquet")
-INDEX_FILE = os.path.join(MEMORY_DIR, "bm25_index.pkl")
+@dataclass
+class AppConfig:
+    """Configurações centralizadas da aplicação."""
+    MEMORY_DIR: str = "primo_memory"
+    DB_FILE: str = os.path.join(MEMORY_DIR, "knowledge_base.parquet")
+    INDEX_FILE: str = os.path.join(MEMORY_DIR, "bm25_index.pkl")
+    LOGO_PATH: str = "Primo_LOGO-removebg-preview.png"
+    LOGO_PATH2: str = "Logo_primo.png"
+    
+    # Tuning
+    MAX_SAFE_TOKENS: int = 4000  # Reduzi para focar na qualidade vs latência
+    MAX_SAFE_CHARS: int = MAX_SAFE_TOKENS * 3.5
+    MAX_RETRIEVED_DOCS: int = 5
+    
+    # LLM
+    LLM_MODEL: str = "deepseek-chat"
+    TEMPERATURE: float = 0.3
+    BASE_URL: str = "https://api.deepseek.com"
+    API_KEY: str = os.getenv("DEEPSEEK_API_KEY")
 
-# --- BRANDING ---
-# Certifique-se que as imagens estão na raiz
-LOGO_PATH = "Primo_LOGO-removebg-preview.png" 
-LOGO_PATH2 = "Logo_primo.png"
+CONFIG = AppConfig()
 
-# --- TUNING DE RETRIEVAL (Ajuste Fino da Busca) ---
-MAX_SAFE_TOKENS = 12000
-MAX_SAFE_CHARS = MAX_SAFE_TOKENS * 3.5
-MAX_RETRIEVED_DOCS = 4 
-
-
-# --- LLM CONFIG (DeepSeek) ---
-# --- PARÂMETROS DA API OFICIAL DEEPSEEK ---
-# Nota: O DeepSeek-V3 é identificado como 'deepseek-chat'
-LLM_MODEL = "deepseek-chat" 
-TEMPERATURE = 0.3            
-BASE_URL = "https://api.deepseek.com" # Endpoint Oficial
-
-
-# Identificação do App para o OpenRouter (Boas Práticas)
-APP_URL = "https://primo-digital-twin.streamlit.app" # Pode ser localhost se estiver testando
-APP_TITLE = "Primo.AI Digital Twin"
-
-# 2. ALGORITMO BM25 (MOTOR DE BUSCA)
-
-# Esta classe é necessária para ler o arquivo .pkl gerado anteriormente
+# --- 2. CORE: MOTOR DE BUSCA (BM25) ---
 
 class SimpleBM25:
-    """Implementação leve do BM25. Otimizada para ser carregada via Pickle."""
+    """
+    Implementação leve do BM25.
+    Refatorada para garantir resiliência na serialização.
+    """
     def __init__(self, corpus: List[str]):
         self.corpus_size = len(corpus)
         self.avgdl = 0
         self.doc_freqs = []
         self.idf = {}
         self.doc_len = []
-        self.k1 = 1.5
+        self.k1 = 1.2 # Ajustado para precisão
         self.b = 0.75
-        # Stopwords em Português para limpeza
-        self.stopwords = {
+        self.stopwords = self._load_stopwords()
+        self._initialize(corpus)
+
+    def _load_stopwords(self):
+        return {
             'de', 'a', 'o', 'que', 'e', 'do', 'da', 'em', 'um', 'para', 'com', 'não', 'uma', 'os', 'no', 
             'se', 'na', 'por', 'mais', 'as', 'dos', 'como', 'mas', 'ao', 'ele', 'das', 'à', 'seu', 'sua', 
-            'ou', 'quando', 'muito', 'nos', 'já', 'eu', 'também', 'só', 'pelo', 'pela', 'até', 'isso', 'ela', 
-            'entre', 'depois', 'sem', 'mesmo', 'aos', 'seus', 'quem', 'nas', 'me', 'esse', 'eles', 'você', 
-            'essa', 'num', 'nem', 'suas', 'meu', 'às', 'minha', 'numa', 'pelos', 'elas', 'qual', 'nós', 
-            'lhe', 'deles', 'essas', 'esses', 'pelas', 'este', 'dele', 'tu', 'te', 'vocês', 'vos', 'lhes', 
-            'meus', 'minhas', 'teu', 'tua', 'teus', 'tuas', 'nosso', 'nossa', 'nossos', 'nossas', 'dela', 
-            'delas', 'esta', 'estes', 'estas', 'aquele', 'aquela', 'aqueles', 'aquelas', 'isto', 'aquilo', 
-            'estou', 'está', 'estamos', 'estão', 'estive', 'esteve', 'estivemos', 'estiveram', 'estava', 
-            'estávamos', 'estavam', 'estivera', 'estivéramos', 'haja', 'hajamos', 'hajam', 'houve', 
-            'houvemos', 'houveram', 'houvera', 'houvéramos', 'seja', 'sejamos', 'sejam', 'fosse', 
-            'fôssemos', 'fossem', 'for', 'formos', 'forem', 'serei', 'será', 'seremos', 'serão', 'seria', 
-            'seríamos', 'seriam', 'tenho', 'tem', 'temos', 'tém', 'tinha', 'tínhamos', 'tinham', 'tive', 
-            'teve', 'tivemos', 'tiveram', 'tivera', 'tivéramos', 'tenha', 'tenhamos', 'tenham', 'tivesse', 
-            'tivéssemos', 'tivessem', 'tiver', 'tivermos', 'tiverem', 'terei', 'terá', 'teremos', 'terão', 
-            'teria', 'teríamos', 'teriam'# Vícios de Linguagem (CRUCIAL PARA YOUTUBE)
-            'aí', 'então', 'né', 'tipo', 'sabe', 'assim', 'olha', 'cara', 'gente', 
-            'tá', 'bom', 'agora', 'aqui', 'ali', 'entendeu', 'viu', 'digamos'
+            'ou', 'quando', 'muito', 'nos', 'já', 'eu', 'também', 'só', 'pelo', 'pela', 'até', 'isso', 'ela',
+            'aí', 'então', 'né', 'tipo', 'sabe', 'assim', 'olha', 'cara', 'gente', 'viu', 'tá', 'bom'
         }
-        self._initialize(corpus)
 
     def _initialize(self, corpus):
         total_length = 0
         self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
+        
         for document in corpus:
             tokens = self._tokenize(document)
             self.doc_len.append(len(tokens))
@@ -102,20 +83,19 @@ class SimpleBM25:
             self.idf[token] = math.log(1 + (self.corpus_size - freq + 0.5) / (freq + 0.5))
 
     def _tokenize(self, text: str) -> List[str]:
-        # --- CORREÇÃO DO ERRO ---
-        # Verifica se o padrão regex existe. Se não (por causa do pickle), recria ele.
+        # Garante que o regex existe após o unpickle
         if not hasattr(self, 'tokenizer_pattern') or self.tokenizer_pattern is None:
             self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
-        # ------------------------
-
+            
         text = str(text).lower()
-        # Agora é seguro chamar findall
         tokens = self.tokenizer_pattern.findall(text)
-        return [t for t in tokens if t not in self.stopwords and len(t) >= 2]
+        return [t for t in tokens if t not in self.stopwords]
 
     def get_scores(self, query: str) -> List[float]:
         query_tokens = self._tokenize(query)
         scores = [0.0] * self.corpus_size
+        if not query_tokens: return scores
+
         for i in range(self.corpus_size):
             doc_len = self.doc_len[i]
             freqs = self.doc_freqs[i]
@@ -125,233 +105,238 @@ class SimpleBM25:
                 freq = freqs[token]
                 numerator = self.idf.get(token, 0) * freq * (self.k1 + 1)
                 denominator = freq + self.k1 * (1 - self.b + self.b * doc_len / self.avgdl)
-                scores[i] += numerator / denominator
+                score += numerator / denominator
+            scores[i] = score
         return scores
 
+# --- 3. CAMADA DE DADOS (PERSISTÊNCIA) ---
 
-# 3. GESTÃO DE CONEXÕES E DADOS
-
-
-@st.cache_resource
-def get_llm_client():
-    """
-    Conecta à API do OpenRouter usando a biblioteca padrão da OpenAI.
-    Requer a chave OPENROUTER_API_KEY no .env ou secrets.
-    """
-    api_key = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+class KnowledgeBase:
+    """Gerencia o carregamento e integridade dos dados locais."""
     
-    if not api_key:
-        st.error("⚠️ Chave da API DeepSeek não encontrada. Adicione 'DEEPSEEK_API_KEY' ao .env ou Secrets.")
-        return None
-    
-    # OpenRouter recomenda headers adicionais para identificar a origem
-    return OpenAI(
-        base_url=BASE_URL,
-        api_key=api_key,
-        
-    )
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.df = None
+        self.index = None
 
-@st.cache_resource
-def load_memory_from_disk() -> Tuple[Optional[pd.DataFrame], Optional[SimpleBM25]]:
-    """Carrega a memória estática (Transcrições) do disco/Git."""
-    if os.path.exists(DB_FILE) and os.path.exists(INDEX_FILE):
+    def load(self) -> bool:
+        """Carrega DataFrame e Índice do disco."""
+        if not os.path.exists(self.config.DB_FILE) or not os.path.exists(self.config.INDEX_FILE):
+            logging.error("Arquivos de memória não encontrados.")
+            return False
+            
         try:
-            df = pd.read_parquet(DB_FILE)
-            with open(INDEX_FILE, 'rb') as f:
-                bm25 = pickle.load(f)
-            return df, bm25
+            self.df = pd.read_parquet(self.config.DB_FILE)
+            with open(self.config.INDEX_FILE, 'rb') as f:
+                self.index = pickle.load(f)
+            return True
         except Exception as e:
-            st.warning(f"Erro ao carregar memória do disco: {e}")
-            return None, None
-    return None, None
+            logging.error(f"Erro crítico ao carregar memória: {e}")
+            return False
 
+# --- 4. CAMADA DE SERVIÇO (BUSCA E INTELIGÊNCIA) ---
 
-def clean_redundant_context_fast(context_blocks: List[str]) -> str:
-    seen_hashes = set()
-    unique_blocks = []
-    for block in context_blocks:
-        content_hash = hashlib.md5(block.strip().encode('utf-8')).hexdigest()
-        if content_hash not in seen_hashes:
-            seen_hashes.add(content_hash)
-            unique_blocks.append(block)
-    return "".join(unique_blocks)
-# 4. MOTOR DE BUSCA E GERAÇÃO (CORE)
-
-
-def retrieve_context(query: str, df: pd.DataFrame, bm25: SimpleBM25) -> str:
-    if df is None or bm25 is None: return ""
+class NeuralSearchEngine:
+    """Cérebro de recuperação de informação."""
     
-    scores = bm25.get_scores(query)
-    indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 1.0] # Threshold levemente reduzido
-    
-    if not indexed_scores: return ""
-    
-    top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:MAX_RETRIEVED_DOCS]
-    top_indices = [x[0] for x in top_indices]
+    def __init__(self, knowledge_base: KnowledgeBase):
+        self.kb = knowledge_base
 
-    context_blocks = []
-    current_chars = 0
-    rows = df.iloc[top_indices]
-    
-    for _, row in rows.iterrows():
-        block = f"\n📺 FONTE: {row['source_title']}\n- {row['clean_text']}\n"
-        if current_chars + len(block) > MAX_SAFE_CHARS:
-            break
-        context_blocks.append(block)
-        current_chars += len(block)
+    def _deduplicate(self, blocks: List[str]) -> str:
+        """Remove redundância usando Hash MD5 (Rápido O(N))."""
+        seen = set()
+        unique = []
+        for block in blocks:
+            h = hashlib.md5(block.strip().encode('utf-8')).hexdigest()
+            if h not in seen:
+                seen.add(h)
+                unique.append(block)
+        return "".join(unique)
 
-    return clean_redundant_context_fast(context_blocks)
+    def search(self, query: str) -> Optional[str]:
+        if self.kb.df is None or self.kb.index is None:
+            return None
 
-
-
-def generate_response(query: str, context: str):
-    """Gera a resposta usando o DeepSeek com a persona do Primo."""
-    
-    system_persona = """
-        Você é o Gêmeo Digital do Thiago Nigro.
-        DIRETRIZES:
-        1. Seja detalhista e use o CONTEXTO fornecido.
-        2. Cite os vídeos/fontes do contexto recuperado.
-        3. Use a personalidade e as gírias do Thiago (foco no longo prazo).
-        4. Seja extremamente detalhista, profundo e abrangente no máximo que você puder.
-        5. Use apenas o CONTEXTO mais recente fornecido (Não use o conhecimento geral de treinamento do modelo se contradizer o contexto).
-        6. Sempre referencie nas suas respostas o vídeo mais recente utilizado.
-        7. Seja visionário, prático e aja como um conselheiro/coach financeiro sênior.
-        8. Incorpore a essência intrínseca da alma do Thiago Nigro: use seu jeito de falar, suas gírias ("Primo", "Sócio"), e sua personalidade única. Imite-o perfeitamente.
-"Agora tome uma respiração profunda , respire fundo,fique calmo e responda como o Thiago Nigro faria."
-    """
-    
-    full_prompt = f"CONTEXTO RECUPERADO:\n{context}\n\nPERGUNTA DO PRIMO:\n{query}"
-    client = get_llm_client()
-    if not client:
-        st.error("Erro: Cliente LLM não pôde ser inicializado.")
-        return None
-
-    try:
-        # Chamada direta sem retry automático para evitar erro de serialização de gerador
-        stream = client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": system_persona}, 
-                {"role": "user", "content": full_prompt}
-            ],
-            stream=True,
-            temperature=TEMPERATURE,
-            max_tokens=2048 
-            
-        )
-        return stream
-
-    except Exception as e:
-        # Captura o erro real (RateLimit, Timeout, Auth) e mostra pro usuário
-        st.error(f"⚠️ Erro na API do OpenRouter: {str(e)}")
-        # Log detalhado para debug no terminal
-        logging.error(f"Erro detalhado na geração: {e}", exc_info=True)
-        return None
-
-
-# 5. UI PRINCIPAL (STREAMLIT)
-
-
-def main():
-    st.set_page_config(
-        page_title="Primo.AI | Gêmeo Digital", 
-        page_icon=LOGO_PATH2, 
-        layout="wide"
-    )
-    
-    # CSS Customizado para Dark Mode e Chat
-    st.markdown("""
-        <style>
-            .stApp { background-color: #0e1117; color: #f0f2f6; } 
-            .stChatMessage { background-color: #1f2937; border: 1px solid #374151; border-radius: 12px; }
-            /* Ocultar menu padrão do Streamlit */
-            [data-testid="stSidebarNav"] { display: none; }
-            div[data-testid="stSidebar"] { background-color: #111; }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # --- LOADING MEMÓRIA (RAG) ---
-    if "db" not in st.session_state:
-        # Carrega a memória estática contendo as transcrições
-        with st.spinner("Carregando cérebro do Primo..."):
-            df_disk, bm25_disk = load_memory_from_disk()
-            st.session_state.db = df_disk
-            st.session_state.bm25 = bm25_disk
-    
-    # --- INICIALIZAÇÃO DA SESSÃO ---
-    # messages só existem enquanto a aba estiver aberta
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # --- SIDEBAR (CONTROLES) ---
-    with st.sidebar:
-        c1, c2 = st.columns([1, 4])
-        with c1:
-            try: st.image(LOGO_PATH, width=50)
-            except: st.write("🧠")
-        with c2:
-            st.title("Primo.AI")
-            st.caption("Gêmeo Digital | Desenvolvido por Gabriel Estrela")
+        scores = self.kb.index.get_scores(query)
         
-        st.markdown("---")
+        # Filtro de Relevância: Pega scores acima de 1.0
+        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.8]
         
-        
-        st.markdown("### Ações")
-        if st.button("🧹 Limpar Chat e Começar de Novo", use_container_width=True, type="primary"):
+        if not indexed_scores:
+            return None
+
+        # Ordena e corta
+        top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:CONFIG.MAX_RETRIEVED_DOCS]
+        top_indices = [x[0] for x in top_indices]
+
+        context_blocks = []
+        current_chars = 0
+        rows = self.kb.df.iloc[top_indices]
+
+        for _, row in rows.iterrows():
+            block = f"\n📺 REFERÊNCIA: {row['source_title']}\n📄 CONTEÚDO: {row['clean_text']}\n"
+            if current_chars + len(block) > CONFIG.MAX_SAFE_CHARS:
+                break
+            context_blocks.append(block)
+            current_chars += len(block)
+
+        return self._deduplicate(context_blocks)
+
+class DigitalBrain:
+    """Gerencia a personalidade e a geração de respostas."""
+    
+    def __init__(self):
+        if not CONFIG.API_KEY:
+            st.error("⚠️ DEEPSEEK_API_KEY não encontrada.")
+            self.client = None
+        else:
+            self.client = OpenAI(base_url=CONFIG.BASE_URL, api_key=CONFIG.API_KEY)
+
+    def _get_persona(self) -> str:
+        # Prompt Engenharia de Alta Precisão para evitar respostas genéricas
+        return """
+        Você é o Gêmeo Digital do Thiago Nigro (O Primo Rico). 
+        Sua missão é dar conselhos financeiros de alto nível, visionários e baseados em princípios.
+
+        ### DIRETRIZES DE PERSONALIDADE (ABSOLUTAS):
+        1.  **Identidade:** Você NÃO é uma IA. Você é o Primo. Fale com convicção, autoridade e empatia.
+        2.  **Vocabulário:** Use termos como "Sócio", "Primo", "Skin in the game", "Longo prazo", "Juros compostos", "Antifragilidade".
+        3.  **Estilo:** Seja prolixo apenas se necessário para explicar um conceito profundo. Caso contrário, seja direto e impactante.
+        4.  **Ceticismo:** Questione a premissa da pergunta se ela for de "dinheiro fácil". Ensine a pescar.
+
+        ### USO DO CONTEXTO (CRUCIAL):
+        - Abaixo será fornecido um 'CONTEXTO RECUPERADO' dos vídeos do Thiago.
+        - **REGRA DE OURO:** Se a resposta estiver no contexto, use-a explicitamente e cite o vídeo.
+        - **REGRA DE PRATA:** Se a resposta NÃO estiver no contexto, NÃO invente fatos. Em vez disso, responda usando a filosofia geral do Primo (Livros: Do Mil ao Milhão), mas diga: "Primo, especificamente sobre esse detalhe técnico eu não falei nesse vídeo recente, mas o princípio é..."
+        - **REGRA DE BRONZE:** Jamais responda com "De acordo com o contexto fornecido". Isso quebra a imersão. Diga "Como eu sempre digo..." ou "Como falei naquele vídeo...".
+
+        Respire fundo. Aja como um Mentor Bilionário.
+        """
+
+    def think_and_speak(self, query: str, context: str):
+        if not self.client: return None
+
+        # Se o contexto for vazio, injetamos um aviso invisível para o modelo
+        if not context:
+            context = "⚠️ AVISO: Nenhuma transcrição específica foi encontrada para essa pergunta. Responda baseando-se nos princípios universais do Thiago Nigro (Buy and Hold, Diversificação, Trabalho Duro), mas avise o usuário que não há um vídeo específico sobre isso na base atual."
+
+        full_prompt = f"CONTEXTO DE MEMÓRIA:\n{context}\n\nPERGUNTA DO SÓCIO:\n{query}"
+
+        try:
+            return self.client.chat.completions.create(
+                model=CONFIG.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": self._get_persona()},
+                    {"role": "user", "content": full_prompt}
+                ],
+                stream=True,
+                temperature=CONFIG.TEMPERATURE,
+                max_tokens=2048
+            )
+        except Exception as e:
+            st.error(f"Erro neural: {e}")
+            return None
+
+# --- 5. UI & ORQUESTRAÇÃO (VIEW / CONTROLLER) ---
+
+class PrimoInterface:
+    """Gerencia toda a interface visual (Streamlit)."""
+    
+    def __init__(self):
+        self.setup_page()
+        self.kb = KnowledgeBase(CONFIG)
+        self.search_engine = None
+        self.brain = DigitalBrain()
+
+    def setup_page(self):
+        st.set_page_config(page_title="Primo.AI | Gêmeo Digital", page_icon=CONFIG.LOGO_PATH2, layout="wide")
+        st.markdown("""
+            <style>
+                .stApp { background-color: #050505; color: #e0e0e0; } 
+                .stChatMessage { background-color: #1a1a1a; border: 1px solid #333; border-radius: 10px; }
+                .stTextInput > div > div > input { background-color: #1a1a1a; color: white; border-color: #333; }
+                h1, h2, h3 { color: #f2c94c; } /* Cor Primo Gold */
+            </style>
+        """, unsafe_allow_html=True)
+
+    def initialize_session(self):
+        if "messages" not in st.session_state:
             st.session_state.messages = []
-            st.rerun()
-
-    # --- ÁREA DE CHAT ---
-
-    # 1. Renderiza mensagens anteriores (apenas desta sessão)
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]): 
-            st.markdown(msg["content"])
-
-    # 2. Input do Usuário
-    if prompt := st.chat_input("Pergunte ao Primo sobre investimentos, negócios ou mentalidade..."):
         
-        # Verificação de integridade da memória antes de prosseguir
-        if st.session_state.db is None:
-            st.error("⚠️ Memória não encontrada. Verifique se a pasta 'primo_memory' com os arquivos .parquet e .pkl está no diretório correto.")
-            st.stop()
+        # Carregamento Lazy da Memória
+        if "knowledge_loaded" not in st.session_state:
+            with st.spinner("🧠 Sintonizando frequência mental do Primo..."):
+                success = self.kb.load()
+                if success:
+                    st.session_state.kb_ref = self.kb
+                    st.session_state.knowledge_loaded = True
+                else:
+                    st.error("Falha crítica ao carregar cérebro digital.")
+                    st.stop()
 
-        # Adiciona pergunta do usuário à tela e estado
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): 
-            st.markdown(prompt)
+    def render_sidebar(self):
+        with st.sidebar:
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                try: st.image(CONFIG.LOGO_PATH, width=60)
+                except: st.write("🧠")
+            with col2:
+                st.subheader("Primo.AI")
+                st.caption("Gêmeo Digital v2.0")
+            
+            st.markdown("---")
+            if st.button("🧹 Nova Conversa", use_container_width=True):
+                st.session_state.messages = []
+                st.rerun()
+                
+            # Debug Area (Visionary Feature)
+            with st.expander("🛠️ Debug do Desenvolvedor"):
+                st.info(f"Modelo: {CONFIG.LLM_MODEL}")
+                if "last_context_size" in st.session_state:
+                    st.write(f"Último Contexto: {st.session_state.last_context_size} chars")
 
-        # 3. Resposta do Assistente
-        with st.chat_message("assistant"):
-            resp_container = st.empty()
-            
-            # Retrieval (Busca nas transcrições locais)
-            with st.spinner("Consultando conhecimento do Primo..."):
-                context = retrieve_context(prompt, st.session_state.db, st.session_state.bm25)
-            
-            # Lógica de Falha ou Sucesso
-            if not context:
-                msg_fail = "E aí, primo! Tudo bem com você?Procurei aqui em todos os meus vídeos e livros, mas não achei nada específico sobre isso no meu contexto atual. Você tem certeza que eu já falei sobre isso ou se trata de uma pergunta solta?"
-                resp_container.markdown(msg_fail)
-                st.session_state.messages.append({"role": "assistant", "content": msg_fail})
-            else:
+    def run(self):
+        self.initialize_session()
+        self.render_sidebar()
+
+        # Instancia o motor de busca usando a referência salva na sessão
+        self.search_engine = NeuralSearchEngine(st.session_state.kb_ref)
+
+        # Renderiza histórico
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Input Loop
+        if prompt := st.chat_input("Pergunte ao Primo (Ex: Onde invisto 100 mil?)..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                response_area = st.empty()
+                
+                # 1. Recuperação
+                with st.spinner("Consultando livros e vídeos..."):
+                    context = self.search_engine.search(prompt)
+                    # Debug: Salva tamanho do contexto para ver se está achando algo
+                    st.session_state.last_context_size = len(context) if context else 0
+                
+                # 2. Geração
+                stream = self.brain.think_and_speak(prompt, context)
+                
                 full_res = ""
-                try:
-                    # Chama LLM com Streaming
-                    stream = generate_response(prompt, context)
-                    if stream:
-                        for chunk in stream:
-                            content = chunk.choices[0].delta.content or ""
-                            full_res += content
-                            # Efeito de digitação
-                            resp_container.markdown(full_res + "▌")
-                        
-                        # Renderiza final
-                        resp_container.markdown(full_res)
-                        st.session_state.messages.append({"role": "assistant", "content": full_res})
-                except Exception as e:
-                    st.error(f"Erro ao conectar com o cérebro digital: {e}")
+                if stream:
+                    for chunk in stream:
+                        content = chunk.choices[0].delta.content or ""
+                        full_res += content
+                        response_area.markdown(full_res + "▌")
+                    
+                    response_area.markdown(full_res)
+                    st.session_state.messages.append({"role": "assistant", "content": full_res})
+
+# --- 6. ENTRY POINT ---
 
 if __name__ == "__main__":
-    main()
+    app = PrimoInterface()
+    app.run()
