@@ -31,15 +31,18 @@ LOGO_PATH = "Primo_LOGO-removebg-preview.png"
 LOGO_PATH2 = "Logo_primo.png"
 
 # --- TUNING DE RETRIEVAL (Ajuste Fino da Busca) ---
-MAX_SAFE_TOKENS = 100000
+MAX_SAFE_TOKENS = 12000
 MAX_SAFE_CHARS = MAX_SAFE_TOKENS * 3.5
-MAX_RETRIEVED_DOCS = 8    
-CONTEXT_WINDOW_SIZE = 4     
+MAX_RETRIEVED_DOCS = 4 
+
 
 # --- LLM CONFIG (DeepSeek) ---
-LLM_MODEL = "openai/gpt-oss-120b:free"
+# --- PARÂMETROS DA API OFICIAL DEEPSEEK ---
+# Nota: O DeepSeek-V3 é identificado como 'deepseek-chat'
+LLM_MODEL = "deepseek-chat" 
 TEMPERATURE = 0.3            
-BASE_URL = "https://openrouter.ai/api/v1"
+BASE_URL = "https://api.deepseek.com" # Endpoint Oficial
+
 
 # Identificação do App para o OpenRouter (Boas Práticas)
 APP_URL = "https://primo-digital-twin.streamlit.app" # Pode ser localhost se estiver testando
@@ -84,6 +87,7 @@ class SimpleBM25:
 
     def _initialize(self, corpus):
         total_length = 0
+        self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
         for document in corpus:
             tokens = self._tokenize(document)
             self.doc_len.append(len(tokens))
@@ -99,8 +103,7 @@ class SimpleBM25:
 
     def _tokenize(self, text: str) -> List[str]:
         text = str(text).lower()
-        text = re.sub(r'[^\w\s]', '', text) 
-        tokens = text.split()
+        tokens = self.tokenizer_pattern.findall(text)
         return [t for t in tokens if t not in self.stopwords and len(t) >= 2]
 
     def get_scores(self, query: str) -> List[float]:
@@ -109,6 +112,7 @@ class SimpleBM25:
         for i in range(self.corpus_size):
             doc_len = self.doc_len[i]
             freqs = self.doc_freqs[i]
+            score = 0.0
             for token in query_tokens:
                 if token not in freqs: continue
                 freq = freqs[token]
@@ -127,20 +131,17 @@ def get_llm_client():
     Conecta à API do OpenRouter usando a biblioteca padrão da OpenAI.
     Requer a chave OPENROUTER_API_KEY no .env ou secrets.
     """
-    api_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    api_key = st.secrets.get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     
     if not api_key:
-        st.error("⚠️ Chave da API OpenRouter não encontrada. Adicione 'OPENROUTER_API_KEY' ao .env ou Secrets.")
+        st.error("⚠️ Chave da API DeepSeek não encontrada. Adicione 'DEEPSEEK_API_KEY' ao .env ou Secrets.")
         return None
     
     # OpenRouter recomenda headers adicionais para identificar a origem
     return OpenAI(
         base_url=BASE_URL,
         api_key=api_key,
-        default_headers={
-            "HTTP-Referer": APP_URL,
-            "X-Title": APP_TITLE,
-        }
+        
     )
 
 @st.cache_resource
@@ -156,67 +157,44 @@ def load_memory_from_disk() -> Tuple[Optional[pd.DataFrame], Optional[SimpleBM25
             st.warning(f"Erro ao carregar memória do disco: {e}")
             return None, None
     return None, None
-def is_similar(a, b, threshold=0.7):
-    """Calcula se dois textos são 70% idênticos."""
-    return SequenceMatcher(None, a, b).ratio() > threshold
 
-def clean_redundant_context(context_blocks: List[str]) -> str:
-    """Remove blocos de texto que dizem a mesma coisa."""
+
+def clean_redundant_context_fast(context_blocks: List[str]) -> str:
+    seen_hashes = set()
     unique_blocks = []
     for block in context_blocks:
-        is_duplicate = False
-        for unique in unique_blocks:
-            if is_similar(block, unique):
-                is_duplicate = True
-                break
-        if not is_duplicate:
+        content_hash = hashlib.md5(block.strip().encode('utf-8')).hexdigest()
+        if content_hash not in seen_hashes:
+            seen_hashes.add(content_hash)
             unique_blocks.append(block)
     return "".join(unique_blocks)
-
 # 4. MOTOR DE BUSCA E GERAÇÃO (CORE)
 
 
 def retrieve_context(query: str, df: pd.DataFrame, bm25: SimpleBM25) -> str:
-    """Busca os trechos mais relevantes nas transcrições."""
     if df is None or bm25 is None: return ""
     
-    # Validação de Segurança e Integridade
-    if len(df) != bm25.corpus_size:
-        return ""
-
     scores = bm25.get_scores(query)
-    # Seleciona os índices com maior pontuação
-    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:MAX_RETRIEVED_DOCS]
-    # Filtra apenas o que tiver relevância mínima (> 1.0)
-    top_indices = [i for i in top_indices if scores[i] > 1.0]
+    indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 1.0] # Threshold levemente reduzido
+    
+    if not indexed_scores: return ""
+    
+    top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:MAX_RETRIEVED_DOCS]
+    top_indices = [x[0] for x in top_indices]
 
-    if not top_indices: return ""
-
-    expanded_indices = set()
-    for idx in top_indices:
-        # Pega janelas de contexto (antes e depois do trecho encontrado)
-        start = max(0, idx - CONTEXT_WINDOW_SIZE)
-        end = min(len(df), idx + CONTEXT_WINDOW_SIZE + 1)
-        original_source = df.iloc[idx]['source_title']
-        for i in range(start, end):
-            # Garante que não misture vídeos diferentes
-            if df.iloc[i]['source_title'] == original_source:
-                expanded_indices.add(i)
-
-    final_indices = sorted(list(expanded_indices))
     context_blocks = []
     current_chars = 0
+    rows = df.iloc[top_indices]
     
-    for idx in final_indices:
-        row = df.iloc[idx]
-        block = f"\n📺 FONTE: {row['source_title']} ({row['source_url']})\n- {row['clean_text']}\n"
+    for _, row in rows.iterrows():
+        block = f"\n📺 FONTE: {row['source_title']}\n- {row['clean_text']}\n"
         if current_chars + len(block) > MAX_SAFE_CHARS:
-            context_blocks.append("\n⚠️ [SISTEMA: CONTEXTO LIMITE ATINGIDO] ⚠️")
             break
         context_blocks.append(block)
         current_chars += len(block)
 
-    return clean_redundant_context(context_blocks)
+    return clean_redundant_context_fast(context_blocks)
+
 
 
 def generate_response(query: str, context: str):
@@ -252,10 +230,8 @@ def generate_response(query: str, context: str):
             ],
             stream=True,
             temperature=TEMPERATURE,
-            max_tokens=8000, 
-            extra_body={
-                "reasoning": {"enabled": True} 
-            }
+            max_tokens=2048 
+            
         )
         return stream
 
