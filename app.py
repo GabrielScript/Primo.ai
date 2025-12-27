@@ -102,7 +102,14 @@ class SimpleBM25:
             self.idf[token] = math.log(1 + (self.corpus_size - freq + 0.5) / (freq + 0.5))
 
     def _tokenize(self, text: str) -> List[str]:
+        # --- CORREÇÃO DO ERRO ---
+        # Verifica se o padrão regex existe. Se não (por causa do pickle), recria ele.
+        if not hasattr(self, 'tokenizer_pattern') or self.tokenizer_pattern is None:
+            self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
+        # ------------------------
+
         text = str(text).lower()
+        # Agora é seguro chamar findall
         tokens = self.tokenizer_pattern.findall(text)
         return [t for t in tokens if t not in self.stopwords and len(t) >= 2]
 
