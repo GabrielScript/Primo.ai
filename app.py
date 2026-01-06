@@ -422,8 +422,7 @@ class PrimoInterface:
             st.markdown("---")
             
             # --- ÁREA DE DIAGNÓSTICO DE DADOS (CRUCIAL) ---
-            st.error("🔧 DEBUG DE DADOS")
-                
+            
                 
                 # MOSTRA AS COLUNAS REAIS DO ARQUIVO
             
