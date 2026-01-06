@@ -36,10 +36,13 @@ class AppConfig:
     MAX_RETRIEVED_DOCS: int = 5
     
     # LLM
-    LLM_MODEL: str = "deepseek-chat"
-    TEMPERATURE: float = 0.3
-    BASE_URL: str = "https://api.deepseek.com"
-    API_KEY: str = os.getenv("DEEPSEEK_API_KEY")
+    LLM_MODEL: str = "xiaomi/mimo-v2-flash:free"
+    TEMPERATURE: float = 0.6 # Aumentei levemente para o Xiaomi ser mais natural
+    BASE_URL: str = "https://openrouter.ai/api/v1"
+    MAX_TOKENS: int = 4096
+    CONTEXT_LENGTH: int = 262144
+    # Certifique-se de ter OPENROUTER_API_KEY no seu .env
+    API_KEY: str = os.getenv("OPENROUTER_API_KEY")
 
 CONFIG = AppConfig()
 
@@ -344,13 +347,13 @@ class DigitalBrain:
     def think_and_speak(self, query: str, context: str):
         if not self.client: return None
 
-        # Se o contexto for vazio, injetamos um aviso invisível para o modelo
         if not context:
             context = "⚠️ AVISO: Nenhuma transcrição específica foi encontrada para essa pergunta. Responda baseando-se nos princípios universais do Thiago Nigro (Buy and Hold, Diversificação, Trabalho Duro), mas avise o usuário que não há um vídeo específico sobre isso na base atual."
 
         full_prompt = f"CONTEXTO DE MEMÓRIA:\n{context}\n\nPERGUNTA DO SÓCIO:\n{query}"
 
         try:
+            # Implementação da chamada OpenRouter com streaming
             return self.client.chat.completions.create(
                 model=CONFIG.LLM_MODEL,
                 messages=[
@@ -359,10 +362,14 @@ class DigitalBrain:
                 ],
                 stream=True,
                 temperature=CONFIG.TEMPERATURE,
-                max_tokens=2048
+                max_tokens=4096,
+                # Injeta a configuração de reasoning solicitada pelo usuário, caso o modelo suporte via API
+                extra_body={
+                    "reasoning": {"enabled": True} 
+                }
             )
         except Exception as e:
-            st.error(f"Erro neural: {e}")
+            st.error(f"Erro neural (OpenRouter): {e}")
             return None
 
 # --- 5. UI & ORQUESTRAÇÃO (VIEW / CONTROLLER) ---
