@@ -6,11 +6,15 @@ import logging
 import hashlib
 import streamlit as st
 import pandas as pd
+import json
+import ast 
 from typing import List, Tuple, Optional, Dict
 from collections import Counter
 from dotenv import load_dotenv
 from openai import OpenAI
 from dataclasses import dataclass
+from datetime import datetime
+import numpy as np
 
 # --- 1. CONFIGURAÇÃO & SINGLETONS ---
 
@@ -42,35 +46,25 @@ CONFIG = AppConfig()
 # --- 2. CORE: MOTOR DE BUSCA (BM25) ---
 
 class SimpleBM25:
-    """
-    Implementação leve do BM25.
-    Refatorada para garantir resiliência na serialização.
-    """
     def __init__(self, corpus: List[str]):
         self.corpus_size = len(corpus)
         self.avgdl = 0
         self.doc_freqs = []
         self.idf = {}
         self.doc_len = []
-        self.k1 = 1.2 # Ajustado para precisão
+        self.k1 = 1.5
         self.b = 0.75
-        self.stopwords = self._load_stopwords()
-        self._initialize(corpus)
-
-    def _load_stopwords(self):
-        return {
+        self.stopwords = {
             'de', 'a', 'o', 'que', 'e', 'do', 'da', 'em', 'um', 'para', 'com', 'não', 'uma', 'os', 'no', 
-            'se', 'na', 'por', 'mais', 'as', 'dos', 'como', 'mas', 'ao', 'ele', 'das', 'à', 'seu', 'sua', 
-            'ou', 'quando', 'muito', 'nos', 'já', 'eu', 'também', 'só', 'pelo', 'pela', 'até', 'isso', 'ela',
-            'aí', 'então', 'né', 'tipo', 'sabe', 'assim', 'olha', 'cara', 'gente', 'viu', 'tá', 'bom'
+            'se', 'na', 'por', 'mais', 'as', 'dos', 'como', 'mas', 'ao', 'ele', 'das', 'à'
         }
+        self.tokenizer_pattern = re.compile(r'\b\w{3,}\b') # Palavras com 3+ letras
+        self._initialize(corpus)
 
     def _initialize(self, corpus):
         total_length = 0
-        self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
-        
         for document in corpus:
-            tokens = self._tokenize(document)
+            tokens = self._tokenize(str(document))
             self.doc_len.append(len(tokens))
             total_length += len(tokens)
             frequencies = Counter(tokens)
@@ -83,18 +77,29 @@ class SimpleBM25:
             self.idf[token] = math.log(1 + (self.corpus_size - freq + 0.5) / (freq + 0.5))
 
     def _tokenize(self, text: str) -> List[str]:
-        # Garante que o regex existe após o unpickle
+        # Garantia de existência do pattern (essencial para Streamlit Cloud)
         if not hasattr(self, 'tokenizer_pattern') or self.tokenizer_pattern is None:
-            self.tokenizer_pattern = re.compile(r'\b\w{2,}\b')
+            self.tokenizer_pattern = re.compile(r'\b\w{3,}\b')
             
         text = str(text).lower()
+        # Remove acentos básicos para aumentar a chance de match
+        text = re.sub(r'[áàâã]', 'a', text)
+        text = re.sub(r'[éèê]', 'e', text)
+        text = re.sub(r'[íìî]', 'i', text)
+        text = re.sub(r'[óòôõ]', 'o', text)
+        text = re.sub(r'[úùû]', 'u', text)
+        
         tokens = self.tokenizer_pattern.findall(text)
         return [t for t in tokens if t not in self.stopwords]
 
     def get_scores(self, query: str) -> List[float]:
         query_tokens = self._tokenize(query)
+        # LOG DE DEBUG: Verifique isso no terminal!
+        logging.info(f"🔎 Tokens extraídos da query: {query_tokens}")
+        
         scores = [0.0] * self.corpus_size
-        if not query_tokens: return scores
+        if not query_tokens: 
+            return scores
 
         for i in range(self.corpus_size):
             doc_len = self.doc_len[i]
@@ -111,62 +116,152 @@ class SimpleBM25:
 
 # --- 3. CAMADA DE DADOS (PERSISTÊNCIA) ---
 
+
 class KnowledgeBase:
-    """Gerencia o carregamento, integridade e reconstrução da memória."""
+    """Gerencia o carregamento, limpeza e indexação da memória."""
     
     def __init__(self, config: AppConfig):
         self.config = config
         self.df = None
         self.index = None
 
+    def _extract_text_from_json(self, raw_data):
+        """
+        Limpeza blindada para transcrições do YouTube.
+        """
+        if pd.isna(raw_data) or raw_data == "":
+            return ""
+            
+        # Caso 1: Já é uma lista de dicionários (o pandas converteu sozinho)
+        if isinstance(raw_data, list):
+            data_list = raw_data
+        
+        # Caso 2: É uma string (JSON ou representação de lista Python)
+        elif isinstance(raw_data, str):
+            clean_str = raw_data.strip()
+            # Tenta JSON padrão primeiro
+            try:
+                data_list = json.loads(clean_str.replace("'", '"')) # Tenta normalizar aspas simples
+            except:
+                # Fallback para ast.literal_eval (estrutura Python)
+                try:
+                    data_list = ast.literal_eval(clean_str)
+                except:
+                    # Se falhar tudo, assume que é texto puro (talvez já limpo)
+                    return clean_str
+        else:
+            return str(raw_data)
+
+        # Extração e Junção
+        try:
+            full_text = []
+            for item in data_list:
+                if isinstance(item, dict) and 'text' in item:
+                    full_text.append(item['text'])
+                elif isinstance(item, str):
+                    full_text.append(item)
+            
+            return " ".join(full_text)
+        except Exception as e:
+            logging.error(f"Erro no parseamento final: {e}")
+            return str(raw_data)
+
     def build_index(self):
-        """Reconstrói o índice BM25 do zero usando o DataFrame carregado."""
+        """Reconstrói o índice BM25 do zero usando o DataFrame limpo."""
         if self.df is None or self.df.empty:
             logging.error("Tentativa de indexar DataFrame vazio.")
             return False
             
-        logging.info("♻️ Reconstruindo índice BM25 com nova lógica...")
+        logging.info("♻️ Indexando conteúdo limpo...")
         try:
-            # Extrai a lista de textos para indexar
+            # Indexa a coluna JÁ LIMPA
+            if 'clean_text' not in self.df.columns:
+                 # Fallback de segurança se a coluna não existir
+                 logging.warning("Coluna 'clean_text' não encontrada. Criando agora...")
+                 self.df['clean_text'] = self.df.iloc[:, 0].apply(self._extract_text_from_json)
+
             corpus = self.df['clean_text'].tolist()
-            # Cria o objeto BM25 com a nova lógica otimizada
             self.index = SimpleBM25(corpus)
             
-            # Salva no disco para a próxima vez ser mais rápido
             with open(self.config.INDEX_FILE, 'wb') as f:
                 pickle.dump(self.index, f)
-            logging.info("✅ Índice reconstruído e salvo com sucesso.")
+            logging.info("✅ Índice reconstruído e salvo.")
             return True
         except Exception as e:
             logging.error(f"Erro ao reconstruir índice: {e}")
             return False
 
     def load(self) -> bool:
-        """Carrega DataFrame e tenta carregar (ou recriar) o Índice."""
-        # 1. Carrega o 'Corpo' (Parquet)
+        # 1. Carrega o Parquet
         if not os.path.exists(self.config.DB_FILE):
-            logging.error(f"ARQUIVO NÃO ENCONTRADO: {self.config.DB_FILE}")
             return False
             
         try:
             self.df = pd.read_parquet(self.config.DB_FILE)
-            logging.info(f"📚 Parquet carregado: {len(self.df)} documentos.")
+            
+            # --- LIMPEZA AUTOMÁTICA ---
+            # Verifica qual coluna tem os dados brutos. Geralmente é a primeira ou tem nome específico.
+            # Aqui assumo que se 'clean_text' já existe, ok. Se não, cria.
+            if 'clean_text' not in self.df.columns:
+                 # Pega a primeira coluna de texto que achar se não souber o nome
+                 target_col = self.df.columns[0] 
+                 logging.info(f"🧹 Limpando dados brutos da coluna: {target_col}...")
+                 self.df['clean_text'] = self.df[target_col].apply(self._extract_text_from_json)
+            else:
+                 # Se já existe, força a re-limpeza para garantir que o novo código seja aplicado
+                 logging.info("🧹 Refazendo limpeza com novo algoritmo...")
+                 self.df['clean_text'] = self.df['clean_text'].apply(self._extract_text_from_json)
+            # -------------------------------------------
+            
+            logging.info(f"📚 Dados carregados e limpos: {len(self.df)} docs.")
         except Exception as e:
             logging.error(f"Erro crítico ao ler Parquet: {e}")
             return False
 
-        # 2. Tenta carregar o 'Cérebro' (Pickle/Index)
+        # 2. Carrega ou Recria o Índice
         index_loaded = False
         if os.path.exists(self.config.INDEX_FILE):
             try:
                 with open(self.config.INDEX_FILE, 'rb') as f:
                     self.index = pickle.load(f)
-                logging.info("🧠 Índice carregado do disco.")
                 index_loaded = True
-            except Exception as e:
-                logging.warning(f"⚠️ Índice antigo incompatível ({e}). Será recriado.")
+            except:
+                pass # Vai recriar se falhar
         
-        # 3. Se não carregou (ou não existia), Recria.
+        if not index_loaded:
+            return self.build_index()
+            
+        return True
+
+    def load(self) -> bool:
+        # 1. Carrega o Parquet
+        if not os.path.exists(self.config.DB_FILE):
+            return False
+            
+        try:
+            self.df = pd.read_parquet(self.config.DB_FILE)
+            
+            # --- LIMPEZA AUTOMÁTICA (O Pulo do Gato) ---
+            # Aplica a função de extração em TODAS as linhas
+            logging.info("🧹 Limpando dados brutos de transcrição...")
+            self.df['clean_text'] = self.df['clean_text'].apply(self._extract_text_from_json)
+            # -------------------------------------------
+            
+            logging.info(f"📚 Dados carregados e limpos: {len(self.df)} docs.")
+        except Exception as e:
+            logging.error(f"Erro crítico ao ler Parquet: {e}")
+            return False
+
+        # 2. Carrega ou Recria o Índice
+        index_loaded = False
+        if os.path.exists(self.config.INDEX_FILE):
+            try:
+                with open(self.config.INDEX_FILE, 'rb') as f:
+                    self.index = pickle.load(f)
+                index_loaded = True
+            except:
+                pass # Vai recriar se falhar
+        
         if not index_loaded:
             return self.build_index()
             
@@ -175,78 +270,49 @@ class KnowledgeBase:
 # --- 4. CAMADA DE SERVIÇO (BUSCA E INTELIGÊNCIA) ---
 
 class NeuralSearchEngine:
-    """Cérebro de recuperação com Fallback de Segurança."""
-    
     def __init__(self, knowledge_base: KnowledgeBase):
         self.kb = knowledge_base
 
-    def _deduplicate(self, blocks: List[str]) -> str:
-        seen = set()
-        unique = []
-        for block in blocks:
-            # Hash simples para evitar textos idênticos repetidos
-            h = hashlib.md5(block.strip().encode('utf-8')).hexdigest()
-            if h not in seen:
-                seen.add(h)
-                unique.append(block)
-        return "".join(unique)
-
-    def _format_results(self, rows) -> List[str]:
-        """Formata as linhas do DF em texto pronto para o LLM."""
-        blocks = []
-        current_chars = 0
-        for _, row in rows.iterrows():
-            block = f"""
-            >>> DOCUMENTO RECUPERADO
-            FONTE: {row['source_title']}
-            CONTEÚDO: {row['clean_text']}
-            """
-            if current_chars + len(block) > CONFIG.MAX_SAFE_CHARS:
-                break
-            blocks.append(block)
-            current_chars += len(block)
-        return blocks
-
     def search(self, query: str) -> Optional[str]:
         if self.kb.df is None or self.kb.index is None:
+            logging.error("❌ KnowledgeBase ou Índice não carregados no NeuralSearchEngine.")
             return None
 
-        # --- ESTRATÉGIA 1: Busca Semântica/Probabilística (BM25) ---
+        # 1. Busca BM25
         scores = self.kb.index.get_scores(query)
-        
-        # Threshold baixíssimo (0.1) para pegar qualquer coisa vagamente relacionada
-        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0.1]
+        indexed_scores = [(i, s) for i, s in enumerate(scores) if s > 0]
         
         top_indices = []
         if indexed_scores:
-            # Se achou algo pelo BM25, ótimo.
             top_indices = sorted(indexed_scores, key=lambda x: x[1], reverse=True)[:CONFIG.MAX_RETRIEVED_DOCS]
+            logging.info(f"🎯 BM25 encontrou {len(top_indices)} documentos relevantes.")
             top_indices = [x[0] for x in top_indices]
-            logging.info(f"🎯 BM25 encontrou {len(top_indices)} resultados.")
-        
-        # --- ESTRATÉGIA 2: Busca "Bruta" (Keyword Match Fallback) ---
-        # Se o BM25 falhou (retornou vazio), usamos força bruta (string contains)
-        if not top_indices:
-            logging.warning("⚠️ BM25 falhou. Tentando busca por palavra-chave bruta...")
-            # Pega palavras da query com mais de 4 letras (ignora 'o', 'que', etc)
-            keywords = [w for w in query.split() if len(w) > 4]
-            
-            if keywords:
-                # Procura a primeira palavra-chave relevante no texto
-                mask = self.kb.df['clean_text'].str.contains(keywords[0], case=False, na=False)
-                fallback_rows = self.kb.df[mask].head(3)
-                if not fallback_rows.empty:
-                    top_indices = fallback_rows.index.tolist()
-                    logging.info(f"🔧 Busca Bruta salvou o dia! Encontrou {len(top_indices)} resultados.")
 
-        # --- FINALIZAÇÃO ---
+        # 2. Busca de Força Bruta (Keyword Match) ampliada
         if not top_indices:
-            return None # Realmente não tem nada no banco sobre isso
+            logging.warning("⚠️ BM25 falhou. Tentando Busca Bruta por palavras individuais...")
+            query_tokens = self.kb.index._tokenize(query)
+            
+            for token in query_tokens:
+                mask = self.kb.df['clean_text'].str.contains(token, case=False, na=False)
+                matches = self.kb.df[mask].head(2)
+                if not matches.empty:
+                    top_indices.extend(matches.index.tolist())
+            
+            # Remove duplicatas mantendo a ordem
+            top_indices = list(dict.fromkeys(top_indices))[:CONFIG.MAX_RETRIEVED_DOCS]
+
+        if not top_indices:
+            logging.error("🛑 NADA encontrado nem no BM25 nem na Busca Bruta.")
+            return None
 
         rows = self.kb.df.iloc[top_indices]
-        context_blocks = self._format_results(rows)
+        blocks = []
+        for _, row in rows.iterrows():
+            block = f"\n[FONTE: {row.get('source_title', 'Vídeo do Primo')}]\n{row['clean_text']}\n"
+            blocks.append(block)
 
-        return self._deduplicate(context_blocks)
+        return "".join(blocks)
 
 class DigitalBrain:
     """Gerencia a personalidade e a geração de respostas."""
@@ -261,22 +327,8 @@ class DigitalBrain:
     def _get_persona(self) -> str:
         # Prompt Engenharia de Alta Precisão para evitar respostas genéricas
         return """
-        Você é o Gêmeo Digital do Thiago Nigro (O Primo Rico). 
-        Sua missão é dar conselhos financeiros de alto nível, visionários e baseados em princípios.
-
-        ### DIRETRIZES DE PERSONALIDADE (ABSOLUTAS):
-        1.  **Identidade:** Você NÃO é uma IA. Você é o Primo. Fale com convicção, autoridade e empatia.
-        2.  **Vocabulário:** Use termos como "Sócio", "Primo", "Skin in the game", "Longo prazo", "Juros compostos", "Antifragilidade".
-        3.  **Estilo:** Seja prolixo apenas se necessário para explicar um conceito profundo. Caso contrário, seja direto e impactante.
-        4.  **Ceticismo:** Questione a premissa da pergunta se ela for de "dinheiro fácil". Ensine a pescar.
-
-        ### USO DO CONTEXTO (CRUCIAL):
-        - Abaixo será fornecido um 'CONTEXTO RECUPERADO' dos vídeos do Thiago.
-        - **REGRA DE OURO:** Se a resposta estiver no contexto, use-a explicitamente e cite o vídeo.
-        - **REGRA DE PRATA:** Se a resposta NÃO estiver no contexto, NÃO invente fatos. Em vez disso, responda usando a filosofia geral do Primo (Livros: Do Mil ao Milhão), mas diga: "Primo, especificamente sobre esse detalhe técnico eu não falei nesse vídeo recente, mas o princípio é..."
-        - **REGRA DE BRONZE:** Jamais responda com "De acordo com o contexto fornecido". Isso quebra a imersão. Diga "Como eu sempre digo..." ou "Como falei naquele vídeo...".
-
-        Respire fundo. Aja como um Mentor Bilionário.
+        
+      
         """
 
     def think_and_speak(self, query: str, context: str):
@@ -408,11 +460,19 @@ class PrimoInterface:
                 # 1. Recuperação
                 with st.spinner("Consultando livros e vídeos..."):
                     context = self.search_engine.search(prompt)
-                    # Debug: Salva tamanho do contexto para ver se está achando algo
-                    st.session_state.last_context_size = len(context) if context else 0
-                
+                    
+                    # --- NOVO: Expander de Debug para você ver o Contexto ---
+                    with st.expander("🕵️‍♂️ O que o Primo 'lembrou'? (Contexto RAG)"):
+                        if context:
+                            st.text(context) # Mostra o texto exato enviado ao LLM
+                        else:
+                            st.warning("Nenhum contexto encontrado!")
+                    # -------------------------------------------------------
+
                 # 2. Geração
                 stream = self.brain.think_and_speak(prompt, context)
+                
+            
                 
                 full_res = ""
                 if stream:
