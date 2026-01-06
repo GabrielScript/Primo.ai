@@ -322,7 +322,7 @@ class DigitalBrain:
     
     def __init__(self):
         if not CONFIG.API_KEY:
-            st.error("⚠️ DEEPSEEK_API_KEY não encontrada.")
+            st.error("⚠️ OPENROUTER_API_KEY não encontrada.")
             self.client = None
         else:
             self.client = OpenAI(base_url=CONFIG.BASE_URL, api_key=CONFIG.API_KEY)
