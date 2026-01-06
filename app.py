@@ -423,30 +423,12 @@ class PrimoInterface:
             
             # --- ÁREA DE DIAGNÓSTICO DE DADOS (CRUCIAL) ---
             st.error("🔧 DEBUG DE DADOS")
-            
-            if st.session_state.kb_ref and st.session_state.kb_ref.df is not None:
-                df = st.session_state.kb_ref.df
-                st.write(f"📊 Total de Documentos: **{len(df)}**")
+                
                 
                 # MOSTRA AS COLUNAS REAIS DO ARQUIVO
-                st.write("🗂️ Colunas Encontradas:")
-                st.code(list(df.columns))
-                
+            
                 # TESTE DE AMOSTRA
-                st.write("🔍 Amostra da 1ª linha:")
-                try:
-                    # Tenta mostrar a coluna clean_text se existir, senão mostra a primeira que for string
-                    if 'clean_text' in df.columns:
-                        st.info(df['clean_text'].iloc[0][:100] + "...")
-                    else:
-                        st.warning("⚠️ COLUNA 'clean_text' NÃO EXISTE!")
-                        st.text(f"Use a coluna: {df.columns[0]}")
-                except:
-                    st.error("Erro ao ler amostra.")
-            else:
-                st.error("❌ DataFrame não carregado!")
-
-            st.markdown("---")
+                
             if st.button("🧹 Nova Conversa", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
