@@ -4,6 +4,7 @@ pandas
 PyPDF2
 python-dotenv
 tenacity
-supabase
 pyarrow
 fastparquet
+chromadb
+sentence-transformers
