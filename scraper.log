@@ -1,0 +1,11 @@
+2026-02-06 19:31:08,574 - ERROR - Erro API ScrapeCreators: 404 - <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot GET /v1/youtube/channel/videos</pre>
+</body>
+</html>
+
