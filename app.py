@@ -28,10 +28,14 @@ class AppConfig:
     LOGO_PATH2: str = "Logo_primo.png"
     
     # Tuning RAG
-    MAX_RETRIEVED_DOCS: int = 30  # Aumentado para capturar mais matches
+    MAX_RETRIEVED_DOCS: int = 30  # Busca ampla inicial para depois filtrar
     CHUNK_SIZE: int = 300  # Tamanho do chunk em palavras (~1 minuto de fala)
     CHUNK_OVERLAP: int = 50 # Sobreposição para contexto
     SIMILARITY_THRESHOLD: float = 0.7  # Threshold de distância coseno (0-2, menor = melhor)
+    
+    # Video-Centric Retrieval
+    MAX_COMPLEMENTARY_VIDEOS: int = 2  # Máximo de vídeos complementares além do principal
+    MIN_CHUNKS_FOR_EXPANSION: int = 3  # Mínimo de chunks para expandir um vídeo como principal
     
     # LLM
     LLM_MODEL: str = "deepseek-chat"
@@ -301,75 +305,132 @@ class KnowledgeBase:
         logging.warning("⚠️ Base de conhecimento vazia. Use o Auto-Sync para popular.")
         return True  # Retorna True para permitir inicialização
 
-# --- 4. ENGINE DE BUSCA ---
+# --- 4. ENGINE DE BUSCA (VIDEO-CENTRIC RETRIEVAL) ---
 
 class NeuralSearchEngine:
     def __init__(self, knowledge_base: KnowledgeBase):
         self.kb = knowledge_base
 
-    def search(self, query: str) -> tuple:
-        """Busca inteligente: Se achar vídeo específico, foca nele. Senão, busca geral."""
+    def _group_by_video(self, semantic_results: list) -> dict:
+        """Agrupa chunks semânticos por video_id e calcula score por vídeo."""
+        video_groups = {}  # video_id -> {chunks, distances, title, url}
         
-        # 1. Tenta identificar Intenção de Vídeo Específico
+        for doc, meta, distance in semantic_results:
+            vid = meta.get('video_id', 'unknown')
+            if vid not in video_groups:
+                video_groups[vid] = {
+                    'chunks': [],
+                    'distances': [],
+                    'title': meta.get('source', 'Vídeo'),
+                    'url': meta.get('url', '')
+                }
+            video_groups[vid]['chunks'].append((doc, meta))
+            video_groups[vid]['distances'].append(distance)
+        
+        return video_groups
+
+    def _rank_videos(self, video_groups: dict) -> list:
+        """Rankeia vídeos por relevância: nº de chunks * inverso da distância média."""
+        ranked = []
+        for vid, data in video_groups.items():
+            chunk_count = len(data['chunks'])
+            avg_dist = sum(data['distances']) / chunk_count
+            # Score: mais chunks + menor distância = mais relevante
+            # Evita divisão por zero
+            score = chunk_count * (1.0 / max(avg_dist, 0.01))
+            ranked.append({
+                'video_id': vid,
+                'score': score,
+                'chunk_count': chunk_count,
+                'avg_distance': avg_dist,
+                'title': data['title'],
+                'url': data['url'],
+                'semantic_chunks': data['chunks']
+            })
+        
+        ranked.sort(key=lambda x: x['score'], reverse=True)
+        return ranked
+
+    def search(self, query: str) -> tuple:
+        """Busca Video-Centric: identifica os vídeos mais relevantes e traz contexto profundo."""
+        
+        # 1. Tenta identificar Intenção de Vídeo Específico (por título)
         title_matches = self.kb.memory.find_videos_by_title_match(query)
         
         hybrid_results = []
         referencias = []
         target_video_found = False
 
-        # Se achou um vídeo com alta confiança (> 0.6), foca SÓ nele
         if title_matches and title_matches[0][1] > 0.6:
             target_vid, score, title = title_matches[0]
-            logging.info(f"🎯 Vídeo Alvo Identificado: '{title}' (Score: {score:.2f})")
-            
-            # Pega TODOS os chunks desse vídeo
+            logging.info(f"🎯 Vídeo Alvo por Título: '{title}' (Score: {score:.2f})")
             video_chunks = self.kb.memory.get_all_chunks_by_video(target_vid)
-            
             if video_chunks:
                 target_video_found = True
-                # Adiciona tudo ao resultado
                 hybrid_results.extend(video_chunks)
                 referencias.append({'titulo': title, 'url': video_chunks[0][1].get('url', '')})
         
-        # 2. Se NÃO achou vídeo específico (ou o score foi baixo), faz busca semântica normal
+        # 2. Busca Semântica → Agrupamento por Vídeo → Expansão do Principal
         if not target_video_found:
-            logging.info("🔍 Busca Semântica Geral iniciada...")
+            logging.info("🔍 Busca Semântica Video-Centric iniciada...")
             semantic_results = self.kb.memory.query(query, n_results=CONFIG.MAX_RETRIEVED_DOCS)
             
-            # Processa resultados semânticos
-            seen_chunks = set()
-            for result in semantic_results:
-                doc = result[0]
-                meta = result[1]
-                if doc not in seen_chunks:
-                    hybrid_results.append((doc, meta))
-                    seen_chunks.add(doc)
-                    
-                    # Adiciona referência se for nova (máximo 3)
-                    if len(referencias) < 3:
-                        ref = {'titulo': meta.get('source', 'Vídeo'), 'url': meta.get('url', '')}
-                        if ref not in referencias:
-                            referencias.append(ref)
+            if not semantic_results:
+                return None, []
+            
+            # Fase 2: Agrupa por vídeo e rankeia
+            video_groups = self._group_by_video(semantic_results)
+            ranked_videos = self._rank_videos(video_groups)
+            
+            logging.info(f"📊 Vídeos encontrados: {len(ranked_videos)} | "
+                         f"Top: '{ranked_videos[0]['title']}' "
+                         f"({ranked_videos[0]['chunk_count']} chunks, "
+                         f"dist_avg={ranked_videos[0]['avg_distance']:.3f})" if ranked_videos else "")
+            
+            # Fase 3: Expansão do vídeo principal
+            if ranked_videos:
+                top_video = ranked_videos[0]
+                
+                # Se o top vídeo tem chunks suficientes, expande com TODOS os chunks dele
+                if top_video['chunk_count'] >= CONFIG.MIN_CHUNKS_FOR_EXPANSION:
+                    logging.info(f"📌 Expandindo vídeo principal: '{top_video['title']}' "
+                                 f"({top_video['chunk_count']} chunks semânticos → buscando todos)")
+                    all_chunks = self.kb.memory.get_all_chunks_by_video(top_video['video_id'])
+                    if all_chunks:
+                        hybrid_results.extend(all_chunks)
+                    else:
+                        hybrid_results.extend(top_video['semantic_chunks'])
+                else:
+                    # Poucos chunks, usa só os semânticos
+                    hybrid_results.extend(top_video['semantic_chunks'])
+                
+                referencias.append({'titulo': top_video['title'], 'url': top_video['url']})
+                
+                # Fase 4: Vídeos complementares (só chunks semânticos, sem expansão)
+                for comp_video in ranked_videos[1:1 + CONFIG.MAX_COMPLEMENTARY_VIDEOS]:
+                    if comp_video['chunk_count'] >= 2:  # Mínimo 2 chunks para ser relevante
+                        hybrid_results.extend(comp_video['semantic_chunks'])
+                        referencias.append({'titulo': comp_video['title'], 'url': comp_video['url']})
+                        logging.info(f"📎 Complemento: '{comp_video['title']}' "
+                                     f"({comp_video['chunk_count']} chunks)")
 
         if not hybrid_results:
             return None, []
 
-        # 3. Montagem do Contexto Final
+        # 3. Montagem do Contexto Final (ordenado cronologicamente quando possível)
         context_blocks = []
-        
-        # Se for vídeo específico, ordenamos sequencialmente (assumindo que chunks têm ordem no ID)
-        if target_video_found:
-             # Tenta ordenar os chunks pelo ID (ex: vid_0, vid_1, vid_2) para manter cronologia
-             try:
-                 hybrid_results.sort(key=lambda x: int(x[1].get('video_id', '0').split('_')[-1]) if '_' in x[1].get('video_id', '') else 0)
-             except:
-                 pass # Se falhar a ordenação, vai como está
+        current_source = None
         
         for text, meta in hybrid_results:
             source = meta.get('source', 'Fonte Desconhecida')
-            context_blocks.append(f"FONTE: {source}\nTRECHO: {text}")
+            # Adiciona separador visual quando muda de vídeo
+            if source != current_source:
+                if current_source is not None:
+                    context_blocks.append("--- FIM DA FONTE ---")
+                context_blocks.append(f"📌 FONTE: {source}")
+                current_source = source
+            context_blocks.append(f"TRECHO: {text}")
             
-        # Junta tudo. DeepSeek tem contexto grande, então podemos ser generosos aqui.
         final_context = "\n\n".join(context_blocks)
         
         return final_context, referencias
