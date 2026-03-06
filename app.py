@@ -1,7 +1,8 @@
 import os
 import re
 import logging
-import time # Adicionado para sleep
+import time
+import subprocess
 import streamlit as st
 import pandas as pd
 import json
@@ -43,6 +44,9 @@ class AppConfig:
     TEMPERATURE: float = 0.6 
     BASE_URL: str = "https://api.deepseek.com"
     API_KEY: str = os.getenv("DEEPSEEK_API_KEY")
+    
+    # Admin
+    ADMIN_KEY: str = os.getenv("ADMIN_KEY", "primo2025admin")
 
 CONFIG = AppConfig()
 
@@ -244,6 +248,98 @@ class KnowledgeBase:
         except Exception as e:
             logging.error(f"❌ Erro ao atualizar JSON master: {e}")
             # Não interrompe o fluxo — os dados já estão no ChromaDB
+
+    def auto_git_push(self):
+        """Commita e faz push do JSON master para o GitHub automaticamente."""
+        try:
+            master_json = "transcricoes_primorico_200.json"
+            subprocess.run(["git", "add", master_json], cwd=".", check=True, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "data: auto-sync novas transcrições"],
+                cwd=".", check=True, capture_output=True
+            )
+            result = subprocess.run(
+                ["git", "push", "origin", "main"],
+                cwd=".", check=True, capture_output=True, text=True, timeout=60
+            )
+            logging.info(f"🚀 Git push automático realizado com sucesso!")
+            return True, "Push realizado!"
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+            logging.error(f"❌ Git push falhou: {err_msg}")
+            return False, f"Erro: {err_msg}"
+        except Exception as e:
+            logging.error(f"❌ Git push erro inesperado: {e}")
+            return False, str(e)
+
+    def process_uploaded_file(self, uploaded_file) -> int:
+        """Processa arquivo enviado pelo admin e indexa no ChromaDB."""
+        filename = uploaded_file.name.lower()
+        text = ""
+        
+        try:
+            if filename.endswith(".txt") or filename.endswith(".md"):
+                text = uploaded_file.read().decode("utf-8")
+            
+            elif filename.endswith(".pdf"):
+                try:
+                    from PyPDF2 import PdfReader
+                    reader = PdfReader(uploaded_file)
+                    text = " ".join([page.extract_text() or "" for page in reader.pages])
+                except ImportError:
+                    logging.error("PyPDF2 não instalado.")
+                    return 0
+            
+            elif filename.endswith(".json"):
+                content = json.loads(uploaded_file.read().decode("utf-8"))
+                if isinstance(content, list):
+                    # Lista de objetos com campo 'text' ou 'transcript'
+                    texts = []
+                    for item in content:
+                        t = item.get("transcript") or item.get("text") or item.get("content", "")
+                        if isinstance(t, list):
+                            t = " ".join([seg.get("text", "") for seg in t if isinstance(seg, dict)])
+                        texts.append(str(t))
+                    text = " ".join(texts)
+                elif isinstance(content, dict):
+                    text = content.get("text") or content.get("transcript") or content.get("content", "")
+                    text = str(text)
+                else:
+                    text = str(content)
+            
+            elif filename.endswith(".csv"):
+                df = pd.read_csv(uploaded_file)
+                # Junta todas as colunas de texto
+                text_cols = df.select_dtypes(include='object').columns
+                text = " ".join(df[text_cols].astype(str).values.flatten())
+            
+            else:
+                # Tenta ler como texto
+                try:
+                    text = uploaded_file.read().decode("utf-8")
+                except:
+                    logging.error(f"Formato não suportado: {filename}")
+                    return 0
+            
+            if not text or len(text.strip()) < 50:
+                return 0
+            
+            # Cria um DataFrame simulando o formato esperado
+            source_name = uploaded_file.name.rsplit('.', 1)[0]
+            df = pd.DataFrame([{
+                "video_id": f"upload_{source_name}",
+                "source_title": f"📄 {uploaded_file.name}",
+                "url": "",
+                "text": text
+            }])
+            
+            self.process_and_index(df)
+            logging.info(f"📄 Arquivo '{uploaded_file.name}' indexado com sucesso.")
+            return 1
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao processar '{uploaded_file.name}': {e}")
+            return 0
 
     def _clean_text(self, text):
         """Limpeza básica de texto."""
@@ -665,25 +761,74 @@ class PrimoInterface:
             """)
             
             st.markdown("---")
-            
-            # Botão de Sincronização Manual
-            if st.button("🔄 Sincronizar Novos Vídeos", use_container_width=True):
-                with st.status("🔄 Buscando novidades no canal...", expanded=True) as status:
-                    st.write("Conectando ao YouTube...")
-                    count = self.kb.sync_new_videos()
-                    if count > 0:
-                        status.update(label=f"✅ {count} novos vídeos aprendidos!", state="complete", expanded=False)
-                        time.sleep(2)
-                        st.rerun()
-                    else:
-                        status.update(label="✅ Tudo atualizado.", state="complete", expanded=False)
-            
-            st.markdown("---")
                 
-            # Botão limpar conversa
+            # Botão limpar conversa (visível para todos)
             if st.button("🗑️ Nova Conversa", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
+            
+            st.markdown("---")
+            
+            # ========== PAINEL ADMIN (escondido) ==========
+            with st.expander("⚙️ Admin", expanded=False):
+                admin_pass = st.text_input("Senha admin", type="password", key="admin_key")
+                
+                if admin_pass == CONFIG.ADMIN_KEY:
+                    st.success("🔓 Acesso admin")
+                    
+                    st.markdown("#### 🔄 Sincronização")
+                    
+                    # Botão Sincronizar Vídeos
+                    if st.button("🔄 Sincronizar Novos Vídeos", use_container_width=True):
+                        with st.status("🔄 Buscando novidades no canal...", expanded=True) as status:
+                            st.write("Conectando ao YouTube...")
+                            count = self.kb.sync_new_videos()
+                            if count > 0:
+                                status.update(label=f"✅ {count} novos vídeos aprendidos!", state="complete", expanded=False)
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                status.update(label="✅ Tudo atualizado.", state="complete", expanded=False)
+                    
+                    # Botão Git Push
+                    if st.button("🚀 Push para GitHub", use_container_width=True):
+                        with st.spinner("Enviando para GitHub..."):
+                            success, msg = self.kb.auto_git_push()
+                            if success:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
+                    
+                    st.markdown("---")
+                    st.markdown("#### 📂 Upload de Conhecimento")
+                    
+                    uploaded_files = st.file_uploader(
+                        "Envie arquivos para o cérebro do Primo",
+                        accept_multiple_files=True,
+                        type=["pdf", "txt", "md", "json", "csv"],
+                        key="admin_upload"
+                    )
+                    
+                    if uploaded_files:
+                        if st.button("🧠 Indexar Arquivos", use_container_width=True):
+                            total = 0
+                            for f in uploaded_files:
+                                with st.spinner(f"Processando {f.name}..."):
+                                    count = self.kb.process_uploaded_file(f)
+                                    total += count
+                            if total > 0:
+                                st.success(f"✅ {total} arquivo(s) indexado(s) com sucesso!")
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.warning("⚠️ Nenhum arquivo continha texto suficiente.")
+                    
+                    # Stats
+                    st.markdown("---")
+                    st.markdown(f"**Chunks no banco:** {self.kb.memory.count()}")
+                
+                elif admin_pass:
+                    st.error("🔒 Senha incorreta")
 
     def run(self):
         self.initialize_session()
