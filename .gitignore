@@ -6,3 +6,20 @@ __pycache__/
 venv/
 .venv/
 .streamlit/secrets.toml
+.agent/
+
+# Banco vetorial (recriado automaticamente a partir dos JSONs)
+primo_memory/chroma_db/
+
+# Arquivos grandes (excedem limite GitHub)
+transcricoes_hubermanlab_500.json
+transcricoes_hubermanlab_500.parquet
+transcricoes_primorico_200_backup.json
+
+# Logs e debug
+*.log
+debug_*.py
+scraper.log
+
+# Parquet intermediário
+primo_memory/*.parquet
