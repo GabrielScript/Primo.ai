@@ -36,6 +36,7 @@ class AppConfig:
     # Video-Centric Retrieval
     MAX_COMPLEMENTARY_VIDEOS: int = 2  # Máximo de vídeos complementares além do principal
     MIN_CHUNKS_FOR_EXPANSION: int = 3  # Mínimo de chunks para expandir um vídeo como principal
+    DOMINANCE_RATIO_THRESHOLD: float = 2.0  # Top vídeo precisa ter score 2x maior que o 2º para expandir
     
     # LLM
     LLM_MODEL: str = "deepseek-chat"
@@ -387,32 +388,52 @@ class NeuralSearchEngine:
                          f"({ranked_videos[0]['chunk_count']} chunks, "
                          f"dist_avg={ranked_videos[0]['avg_distance']:.3f})" if ranked_videos else "")
             
-            # Fase 3: Expansão do vídeo principal
+            # Fase 3: Decisão — Expandir (dominância) ou Balancear?
             if ranked_videos:
                 top_video = ranked_videos[0]
+                second_video = ranked_videos[1] if len(ranked_videos) > 1 else None
                 
-                # Se o top vídeo tem chunks suficientes, expande com TODOS os chunks dele
-                if top_video['chunk_count'] >= CONFIG.MIN_CHUNKS_FOR_EXPANSION:
-                    logging.info(f"📌 Expandindo vídeo principal: '{top_video['title']}' "
-                                 f"({top_video['chunk_count']} chunks semânticos → buscando todos)")
+                # Calcula Dominance Ratio: quão superior é o top vs o 2º
+                if second_video:
+                    dominance_ratio = top_video['score'] / max(second_video['score'], 0.01)
+                else:
+                    dominance_ratio = float('inf')  # Só tem 1 vídeo → domina por padrão
+                
+                is_dominant = (
+                    dominance_ratio >= CONFIG.DOMINANCE_RATIO_THRESHOLD
+                    and top_video['chunk_count'] >= CONFIG.MIN_CHUNKS_FOR_EXPANSION
+                )
+                
+                if is_dominant:
+                    # 🎯 MODO FOCO: Top vídeo domina → expande com TODOS os chunks
+                    logging.info(f"🎯 MODO FOCO | Dominance Ratio: {dominance_ratio:.2f}x | "
+                                 f"Expandindo '{top_video['title']}' "
+                                 f"({top_video['chunk_count']} semânticos → buscando todos)")
                     all_chunks = self.kb.memory.get_all_chunks_by_video(top_video['video_id'])
                     if all_chunks:
                         hybrid_results.extend(all_chunks)
                     else:
                         hybrid_results.extend(top_video['semantic_chunks'])
+                    
+                    referencias.append({'titulo': top_video['title'], 'url': top_video['url']})
+                    
+                    # Complementos (só chunks semânticos, sem expansão)
+                    for comp_video in ranked_videos[1:1 + CONFIG.MAX_COMPLEMENTARY_VIDEOS]:
+                        if comp_video['chunk_count'] >= 2:
+                            hybrid_results.extend(comp_video['semantic_chunks'])
+                            referencias.append({'titulo': comp_video['title'], 'url': comp_video['url']})
+                            logging.info(f"📎 Complemento: '{comp_video['title']}' "
+                                         f"({comp_video['chunk_count']} chunks)")
                 else:
-                    # Poucos chunks, usa só os semânticos
-                    hybrid_results.extend(top_video['semantic_chunks'])
-                
-                referencias.append({'titulo': top_video['title'], 'url': top_video['url']})
-                
-                # Fase 4: Vídeos complementares (só chunks semânticos, sem expansão)
-                for comp_video in ranked_videos[1:1 + CONFIG.MAX_COMPLEMENTARY_VIDEOS]:
-                    if comp_video['chunk_count'] >= 2:  # Mínimo 2 chunks para ser relevante
-                        hybrid_results.extend(comp_video['semantic_chunks'])
-                        referencias.append({'titulo': comp_video['title'], 'url': comp_video['url']})
-                        logging.info(f"📎 Complemento: '{comp_video['title']}' "
-                                     f"({comp_video['chunk_count']} chunks)")
+                    # ⚖️ MODO BALANCEADO: Relevância distribuída → top 3 equilibrados
+                    logging.info(f"⚖️ MODO BALANCEADO | Dominance Ratio: {dominance_ratio:.2f}x | "
+                                 f"Distribuindo contexto entre top {min(3, len(ranked_videos))} vídeos")
+                    
+                    for video in ranked_videos[:3]:  # Top 3 vídeos, chunks semânticos apenas
+                        hybrid_results.extend(video['semantic_chunks'])
+                        referencias.append({'titulo': video['title'], 'url': video['url']})
+                        logging.info(f"📊 Balanceado: '{video['title']}' "
+                                     f"({video['chunk_count']} chunks, score={video['score']:.2f})")
 
         if not hybrid_results:
             return None, []
