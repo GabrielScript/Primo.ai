@@ -345,10 +345,11 @@ class NeuralSearchEngine:
                     hybrid_results.append((doc, meta))
                     seen_chunks.add(doc)
                     
-                    # Adiciona referência se for nova
-                    ref = {'titulo': meta.get('source', 'Vídeo'), 'url': meta.get('url', '')}
-                    if ref not in referencias:
-                        referencias.append(ref)
+                    # Adiciona referência se for nova (máximo 3)
+                    if len(referencias) < 3:
+                        ref = {'titulo': meta.get('source', 'Vídeo'), 'url': meta.get('url', '')}
+                        if ref not in referencias:
+                            referencias.append(ref)
 
         if not hybrid_results:
             return None, []
@@ -422,6 +423,8 @@ Você é o maior educador financeiro do Brasil, autor best-seller de "Do Mil ao 
 4. Nunca dê conselho de investimento específico tipo "compra X ação". Você educa, não dá call
 5. Responda SEMPRE em Português do Brasil
 6. Seja DETALHADO e ROBUSTO nas respostas - explique o "porquê" das coisas
+7. **NUNCA trunce, abrevie ou resuma números, valores, percentuais ou dados financeiros** - Escreva TODOS os números por extenso e completos (ex: R$ 1.000.000,00 e não "R$ 1M"). Se houver uma lista de valores ou etapas numéricas, inclua TODAS sem pular nenhuma.
+8. **SEMPRE complete sua resposta** - Não pare no meio. Se a resposta for longa, continue até o final.
         """
 
     def think_and_speak(self, query: str, context: str):
@@ -446,6 +449,8 @@ Você é o maior educador financeiro do Brasil, autor best-seller de "Do Mil ao 
 4. Seja detalhado, prático e dê exemplos concretos
 5. Use seu jeito característico de falar
 6. NÃO invente informações que não estão no contexto
+7. INCLUA TODOS os números, valores e percentuais COMPLETOS - NUNCA trunce dados numéricos
+8. COMPLETE a resposta inteira sem cortar no meio
 
 Agora responde aí, primo:"""
         
@@ -460,6 +465,7 @@ Agora responde aí, primo:"""
                 messages=messages,
                 stream=True,
                 temperature=CONFIG.TEMPERATURE,
+                max_tokens=4096,
             )
         except Exception as e:
             st.error(f"Erro na API LLM: {e}")
@@ -503,20 +509,13 @@ class PrimoInterface:
                     st.error("Falha crítica ao carregar cérebro digital.")
                     st.stop()
 
-        # --- AUTO-SYNC (NOVO: Atualização Automática no Login) ---
-        if "auto_sync_done" not in st.session_state:
-            with st.status("🔄 Verificando novos vídeos no YouTube...", expanded=True) as status:
-                st.write("Conectando ao canal do Primo...")
-                count = self.kb.sync_new_videos()
-                if count > 0:
-                     status.update(label=f"✅ Base atualizada! {count} novos vídeos aprendidos.", state="complete", expanded=False)
-                     time.sleep(1) # Breve pausa para o usuário ver
-                else:
-                     status.update(label="✅ Sistema já está atualizado.", state="complete", expanded=False)
-            
-            st.session_state.auto_sync_done = True
-            if count > 0:
-                 st.rerun() # Refresh para carregar os novos dados na memória ativa
+        # Tenta achar JSON se não tiver Parquet
+        # Prioriza o arquivo de backup específico que o usuário mencionou
+        specific_backup = "transcricoes_primorico_200.json"
+        
+        # --- AUTO-SYNC REMOVIDO DA INICIALIZAÇÃO ---
+        # A atualização agora é manual via botão na sidebar
+        # para não travar o início do app.
 
     def render_sidebar(self):
         with st.sidebar:
@@ -535,6 +534,20 @@ class PrimoInterface:
             Pergunte sobre investimentos, 
             finanças pessoais e educação financeira.
             """)
+            
+            st.markdown("---")
+            
+            # Botão de Sincronização Manual
+            if st.button("🔄 Sincronizar Novos Vídeos", use_container_width=True):
+                with st.status("🔄 Buscando novidades no canal...", expanded=True) as status:
+                    st.write("Conectando ao YouTube...")
+                    count = self.kb.sync_new_videos()
+                    if count > 0:
+                        status.update(label=f"✅ {count} novos vídeos aprendidos!", state="complete", expanded=False)
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        status.update(label="✅ Tudo atualizado.", state="complete", expanded=False)
             
             st.markdown("---")
                 
@@ -581,7 +594,7 @@ class PrimoInterface:
                     # Adiciona referências ao final da resposta
                     if referencias:
                         refs_text = "\n\n---\n**📺 Referências:**\n"
-                        for ref in referencias:
+                        for ref in referencias[:3]:  # Máximo 3 referências
                             titulo = ref.get('titulo', 'Vídeo')
                             url = ref.get('url', '')
                             if url:

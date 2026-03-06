@@ -18,9 +18,9 @@ except ImportError:
 # ⭐ Defina sua chave de API aqui ou via variável de ambiente "SCRAPECREATORS_API_KEY"
 SCRAPECREATORS_API_KEY = os.getenv("SCRAPECREATORS_API_KEY")
 # ⭐ Defina o "handle" (nome) do canal
-CHANNEL_HANDLE = "primorico" # Exemplo: "allinpodcast" ou "ThePatMcAfeeShow"
+CHANNEL_HANDLE = "primorico" # Canal do Primo Rico
 # ⭐ Defina quantos vídeos você deseja (Meta de Custo: ~MAX_VIDEOS + (MAX_VIDEOS / 30))
-MAX_VIDEOS = 200
+MAX_VIDEOS = 500
 # ⭐ Ordenar por 'latest' (mais recente) ou 'popular'
 SORT_BY = "latest"
 
@@ -170,6 +170,59 @@ def fetch_video_transcript(session, video_item, api_key):
         # Não paramos o script por um vídeo, apenas registramos o erro
         print(f"\n⚠️ Erro ao buscar transcrição para {video_url}: {e}")
         return None
+
+# ==========================
+# FUNÇÃO DE AUTO-SYNC (chamada pelo app.py)
+# ==========================
+def update_channel_data(existing_ids=None):
+    """
+    Busca APENAS vídeos novos que não estão na base.
+    Retorna lista de dicts com video_id, source_title, url, transcript (texto).
+    """
+    if not SCRAPECREATORS_API_KEY:
+        print("⚠️ SCRAPECREATORS_API_KEY não configurada. Auto-sync desabilitado.")
+        return []
+    
+    if existing_ids is None:
+        existing_ids = []
+    
+    existing_set = set(existing_ids)
+    session = create_session_with_retry()
+    
+    # Busca os vídeos mais recentes (limite menor para sync rápido)
+    video_list = fetch_youtube_video_list(session, CHANNEL_HANDLE, SCRAPECREATORS_API_KEY, max_videos=60)
+    
+    if not video_list:
+        return []
+    
+    # Filtra apenas vídeos NOVOS
+    new_videos = [v for v in video_list if v.get("id") not in existing_set]
+    
+    if not new_videos:
+        print("✅ Nenhum vídeo novo encontrado.")
+        return []
+    
+    print(f"🆕 {len(new_videos)} vídeos novos detectados. Buscando transcrições...")
+    
+    results = []
+    for video_item in new_videos:
+        transcript_data = fetch_video_transcript(session, video_item, SCRAPECREATORS_API_KEY)
+        if transcript_data:
+            # Formata para o padrão esperado pelo app.py (KnowledgeBase.process_and_index)
+            transcript_text = transcript_data.get("transcript", "")
+            if isinstance(transcript_text, list):
+                transcript_text = " ".join([seg.get("text", "") for seg in transcript_text if isinstance(seg, dict)])
+            
+            results.append({
+                "video_id": transcript_data.get("video_id", ""),
+                "source_title": transcript_data.get("title", "Vídeo Sem Título"),
+                "url": transcript_data.get("url", ""),
+                "text": transcript_text
+            })
+        time.sleep(0.3)
+    
+    print(f"✅ Auto-sync: {len(results)} novos vídeos processados.")
+    return results
 
 # ==========================
 # FUNÇÃO PRINCIPAL (MAIN)
