@@ -175,9 +175,8 @@ class KnowledgeBase:
         self.memory = VectorMemory(config)
 
     def sync_new_videos(self):
-        """Chama o scraper para buscar apenas vídeos novos."""
+        """Busca vídeos novos, indexa no ChromaDB E persiste no JSON master."""
         try:
-            # Import dinâmico para evitar erro circular ou de dependência se script faltar
             from Transcript_Channel import update_channel_data
         except ImportError:
             logging.error("Script Transcript_Channel.py não encontrado.")
@@ -191,12 +190,60 @@ class KnowledgeBase:
         if not new_data:
             return 0
             
-        # Converte para DataFrame para reaproveitar lógica de indexação
+        # 1. Indexa no ChromaDB (efeito imediato na sessão atual)
         df_new = pd.DataFrame(new_data)
-        
-        # Indexa no Chroma
         self.process_and_index(df_new)
+        
+        # 2. Persiste no JSON master (sobrevive reinícios e deploys)
+        self._merge_into_master_json(new_data)
+        
         return len(new_data)
+
+    def _merge_into_master_json(self, new_data: list):
+        """Mescla novos vídeos no JSON master para não precisar re-fetch."""
+        master_json = "transcricoes_primorico_200.json"
+        
+        try:
+            # Lê o JSON master existente
+            if os.path.exists(master_json):
+                with open(master_json, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                if not isinstance(existing_data, list):
+                    existing_data = []
+            else:
+                existing_data = []
+            
+            # IDs já presentes no master para evitar duplicatas
+            existing_video_ids = set()
+            for item in existing_data:
+                vid = item.get("video_id") or item.get("id", "")
+                if vid:
+                    existing_video_ids.add(vid)
+            
+            # Filtra apenas vídeos realmente novos
+            videos_to_add = []
+            for video in new_data:
+                vid = video.get("video_id", "")
+                if vid and vid not in existing_video_ids:
+                    videos_to_add.append(video)
+            
+            if not videos_to_add:
+                logging.info("📄 Nenhum vídeo novo para adicionar ao JSON master.")
+                return
+            
+            # Mescla: novos no início (mais recentes primeiro)
+            merged = videos_to_add + existing_data
+            
+            # Salva o JSON atualizado
+            with open(master_json, "w", encoding="utf-8") as f:
+                json.dump(merged, f, ensure_ascii=False, indent=2)
+            
+            logging.info(f"💾 JSON master atualizado: +{len(videos_to_add)} vídeos → "
+                         f"total {len(merged)} (era {len(existing_data)})")
+            
+        except Exception as e:
+            logging.error(f"❌ Erro ao atualizar JSON master: {e}")
+            # Não interrompe o fluxo — os dados já estão no ChromaDB
 
     def _clean_text(self, text):
         """Limpeza básica de texto."""
